@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 import fitz  # PyMuPDF
-from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QMutex, QObject, QPoint, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QBrush, QColor, QIcon, QImage, QKeySequence, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -27,6 +27,81 @@ from pdf_editor_models import (
 )
 from pdf_text_edit_support import TextEditSupport
 from pdf_editor_views import PdfView, ThumbnailListWidget
+
+
+class _RenderSignals(QObject):
+    finished = Signal(int, int, QImage, list)  # generation, page_idx, image, spans
+
+
+class _PageRenderWorker(QThread):
+    """Background worker that renders PDF pages off the main thread."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._signals = _RenderSignals()
+        self.finished = self._signals.finished
+        self._queue: list = []
+        self._mutex = QMutex()
+        self._abort = False
+        self._pdf_path: Optional[str] = None
+        self._pdf_password: Optional[str] = None
+        self._generation = 0
+        self._extract_spans_func = None
+
+    def configure(self, pdf_path: str, password: Optional[str], generation: int,
+                  extract_spans_func):
+        self._pdf_path = pdf_path
+        self._pdf_password = password
+        self._generation = generation
+        self._extract_spans_func = extract_spans_func
+
+    def enqueue(self, page_idx: int, zoom: float, oversample: float):
+        self._mutex.lock()
+        self._queue.append((page_idx, zoom, oversample))
+        self._mutex.unlock()
+
+    def abort(self):
+        self._mutex.lock()
+        self._abort = True
+        self._queue.clear()
+        self._mutex.unlock()
+
+    def run(self):
+        self._abort = False
+        if not self._pdf_path:
+            return
+        try:
+            doc = fitz.open(self._pdf_path)
+            if doc.needs_pass and self._pdf_password:
+                doc.authenticate(self._pdf_password)
+        except Exception:
+            return
+
+        while True:
+            self._mutex.lock()
+            if self._abort or not self._queue:
+                self._mutex.unlock()
+                break
+            page_idx, zoom, oversample = self._queue.pop(0)
+            gen = self._generation
+            self._mutex.unlock()
+
+            try:
+                page = doc[page_idx]
+                render_scale = float(zoom) * float(oversample)
+                pix = page.get_pixmap(matrix=fitz.Matrix(render_scale, render_scale), alpha=False)
+                image = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format_RGB888).copy()
+
+                if self._extract_spans_func:
+                    spans = self._extract_spans_func(page)
+                else:
+                    spans = []
+
+                self.finished.emit(gen, page_idx, image, spans)
+            except Exception:
+                pass
+
+        doc.close()
 
 
 class MainWindow(QMainWindow):
@@ -198,6 +273,11 @@ class MainWindow(QMainWindow):
         self._visible_render_timer = QTimer(self)
         self._visible_render_timer.setSingleShot(True)
         self._visible_render_timer.timeout.connect(self._refresh_visible_after_scroll)
+
+        self._render_generation = 0
+        self._render_worker: Optional[_PageRenderWorker] = None
+        self._pending_render_pages: Set[int] = set()
+
         self._scene_padding_x = 18.0
         self._scene_padding_y = 12.0
         self._scene_page_gap = 18.0
@@ -1265,6 +1345,46 @@ class MainWindow(QMainWindow):
             return
         self.render_page()
 
+    def _start_background_render(self, page_indices: List[int]):
+        if self._render_worker and self._render_worker.isRunning():
+            self._render_worker.abort()
+            self._render_worker.wait(500)
+
+        self._render_generation += 1
+        gen = self._render_generation
+
+        worker = _PageRenderWorker(self)
+        worker.configure(
+            pdf_path=str(self.base_path),
+            password=None,
+            generation=gen,
+            extract_spans_func=self._extract_spans,
+        )
+        for p in page_indices:
+            worker.enqueue(p, float(self.zoom), float(self._page_render_oversample))
+            self._pending_render_pages.add(p)
+
+        worker.finished.connect(self._on_page_rendered)
+        worker.finished_signal = worker.finished  # prevent GC
+        self._render_worker = worker
+        worker.start()
+
+    def _on_page_rendered(self, generation: int, page_idx: int, image: QImage, spans: list):
+        self._pending_render_pages.discard(page_idx)
+        if generation != self._render_generation:
+            return
+        if not self._has_open_doc():
+            return
+
+        pixmap = QPixmap.fromImage(image)
+        pixmap.setDevicePixelRatio(float(self._page_render_oversample))
+        self._cache_put(page_idx, pixmap, spans)
+
+        cache_key = (str(self.base_path), int(page_idx))
+        self._page_base_spans_cache[cache_key] = spans
+
+        self.render_page()
+
     def _scroll_to_current_page(self):
         layout = self._page_scene_layouts.get(self.current_page_index)
         if not layout:
@@ -1462,6 +1582,10 @@ class MainWindow(QMainWindow):
     # ---------------- Rendering / Extract ----------------
 
     def _invalidate_render_cache(self):
+        self._render_generation += 1
+        self._pending_render_pages.clear()
+        if self._render_worker and self._render_worker.isRunning():
+            self._render_worker.abort()
         self._render_pix_cache.clear()
         self._render_span_cache.clear()
         self._render_cache_order.clear()
@@ -1699,15 +1823,9 @@ class MainWindow(QMainWindow):
         missing_page_indices = [page_idx for page_idx in page_indices if self._cache_get(page_idx)[0] is None]
 
         if missing_page_indices:
-            for page_idx in missing_page_indices:
-                page = self.doc[page_idx]
-                spans = self._get_page_base_spans(page_idx)
-                render_scale = float(self.zoom) * float(self._page_render_oversample)
-                pix = page.get_pixmap(matrix=fitz.Matrix(render_scale, render_scale), alpha=False)
-                image = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format_RGB888)
-                pixmap = QPixmap.fromImage(image)
-                pixmap.setDevicePixelRatio(float(self._page_render_oversample))
-                self._cache_put(page_idx, pixmap, spans)
+            bg_pages = [p for p in missing_page_indices if p not in self._pending_render_pages]
+            if bg_pages:
+                self._start_background_render(bg_pages)
 
         self.scene.clear()
         self.current_spans_by_page = {}
@@ -1715,10 +1833,19 @@ class MainWindow(QMainWindow):
         max_bottom = 0.0
 
         for page_idx in page_indices:
+            x0, y0, width, height = self._page_scene_layouts.get(page_idx, (0.0, 0.0, 0.0, 0.0))
             pixmap, spans = self._cache_get(page_idx)
             if pixmap is None or spans is None:
+                bg_brush = QBrush(QColor(245, 245, 245))
+                bg_pen = QPen(QColor(210, 210, 210))
+                bg_pen.setWidth(1)
+                self.scene.addRect(x0, y0, width, height, bg_pen, bg_brush)
+                label = self.scene.addText(f"로딩 중... (페이지 {page_idx + 1})")
+                label.setPos(x0 + width / 2 - 60, y0 + height / 2 - 10)
+                label.setDefaultTextColor(QColor(150, 150, 150))
+                max_width = max(max_width, x0 + width + self._scene_padding_x)
+                max_bottom = max(max_bottom, y0 + height + self._scene_padding_y)
                 continue
-            x0, y0, width, height = self._page_scene_layouts.get(page_idx, (0.0, 0.0, 0.0, 0.0))
             item = self.scene.addPixmap(pixmap)
             item.setPos(x0, y0)
             self.current_spans_by_page[page_idx] = spans
