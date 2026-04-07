@@ -164,8 +164,9 @@ class MainWindow(QMainWindow):
             return
         try:
             p = Path(path)
-            if hasattr(self, "_session_temp_files"):
-                self._session_temp_files.discard(p)
+            if not hasattr(self, "_session_temp_files") or p not in self._session_temp_files:
+                return
+            self._session_temp_files.discard(p)
             if p.exists():
                 p.unlink()
         except Exception:
@@ -1098,13 +1099,11 @@ class MainWindow(QMainWindow):
             image_w = max(1.0, float(page_rect.width) * scale)
             image_h = max(1.0, float(page_rect.height) * scale)
 
-        grid = self.thumbnail_list.gridSize()
-        label_h = self.thumbnail_list.fontMetrics().height() + 6
-        icon_area_h = float(grid.height()) - label_h
-        icon_area_w = float(item_rect.width())
-
-        image_x = float(item_rect.left()) + (icon_area_w - image_w) * 0.5
-        image_y = float(item_rect.top()) + (icon_area_h - image_h) * 0.5
+        item_w = float(item_rect.width())
+        item_h = float(item_rect.height())
+        top_pad = (item_h - image_h) * 0.22
+        image_x = float(item_rect.left()) + (item_w - image_w) * 0.5
+        image_y = float(item_rect.top()) + top_pad
         return (image_x, image_y, image_w, image_h)
 
     def _thumbnail_focus_fraction_from_click(
@@ -1119,6 +1118,7 @@ class MainWindow(QMainWindow):
         x0, y0, width, height = image_rect
         px = float(click_pos.x())
         py = float(click_pos.y())
+
         if not (x0 <= px <= x0 + width and y0 <= py <= y0 + height):
             return (0.5, 0.5)
 
