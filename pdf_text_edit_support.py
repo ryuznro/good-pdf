@@ -2392,6 +2392,9 @@ class TextEditSupport:
             src_doc.close()
             src_doc = None
 
+            saved_h = w.view.horizontalScrollBar().value()
+            saved_v = w.view.verticalScrollBar().value()
+
             old_base = w.base_path
             old_temp = w.temp_margin_file
             w._activate_temp_pdf(tmp_path, old_base, old_temp)
@@ -2401,8 +2404,10 @@ class TextEditSupport:
             w._clear_search_state()
             w._mark_modified()
             w._refresh_thumbnail_sidebar(force=True)
-            w._scroll_to_current_after_render = w.continuous_view
+            w._scroll_to_current_after_render = False
             w.render_page()
+            w.view.horizontalScrollBar().setValue(saved_h)
+            w.view.verticalScrollBar().setValue(saved_v)
             w.statusBar().showMessage("텍스트를 적용했습니다.", 1800)
             return True
 
@@ -2591,6 +2596,9 @@ class TextEditSupport:
             src_doc.close()
             src_doc = None
 
+            saved_h = w.view.horizontalScrollBar().value()
+            saved_v = w.view.verticalScrollBar().value()
+
             old_base = w.base_path
             old_temp = w.temp_margin_file
             w._activate_temp_pdf(tmp_path, old_base, old_temp)
@@ -2600,8 +2608,10 @@ class TextEditSupport:
             w._clear_search_state()
             w._mark_modified()
             w._refresh_thumbnail_sidebar(force=True)
-            w._scroll_to_current_after_render = w.continuous_view
+            w._scroll_to_current_after_render = False
             w.render_page()
+            w.view.horizontalScrollBar().setValue(saved_h)
+            w.view.verticalScrollBar().setValue(saved_v)
             w.statusBar().showMessage("텍스트를 적용했습니다.", 1800)
             return True
 

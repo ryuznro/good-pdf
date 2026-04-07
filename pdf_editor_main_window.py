@@ -1083,13 +1083,13 @@ class MainWindow(QMainWindow):
         image_w = max(1.0, float(page_rect.width) * scale)
         image_h = max(1.0, float(page_rect.height) * scale)
 
-        label_height = self.thumbnail_list.fontMetrics().height() + 18
-        content_left = float(item_rect.left() + 8)
-        content_top = float(item_rect.top() + 6)
-        content_width = max(image_w, float(item_rect.width() - 16))
-        content_height = max(image_h, float(item_rect.height() - label_height - 10))
-        image_x = content_left + max(0.0, (content_width - image_w) * 0.5)
-        image_y = content_top + max(0.0, (content_height - image_h) * 0.5)
+        icon_area_w = float(icon_size.width())
+        icon_area_h = float(icon_size.height())
+        icon_area_x = float(item_rect.left()) + (float(item_rect.width()) - icon_area_w) * 0.5
+        icon_area_y = float(item_rect.top()) + 4.0
+
+        image_x = icon_area_x + (icon_area_w - image_w) * 0.5
+        image_y = icon_area_y + (icon_area_h - image_h) * 0.5
         return (image_x, image_y, image_w, image_h)
 
     def _thumbnail_focus_fraction_from_click(
