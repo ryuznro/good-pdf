@@ -48,12 +48,21 @@ class NewLinkEntry:
     page_index: int
     rect: fitz.Rect
     target_page: int
+    uri: str = ""
 
 
 @dataclass
 class LinkDeleteEntry:
     page_index: int
     link_rect: fitz.Rect
+
+
+@dataclass
+class AnnotationEntry:
+    page_index: int
+    rect: fitz.Rect
+    annot_type: str  # "highlight", "underline", "strikeout"
+    color: tuple = (1, 1, 0)  # default yellow
 
 
 @dataclass

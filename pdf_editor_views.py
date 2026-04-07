@@ -97,6 +97,12 @@ class PdfView(QGraphicsView):
             event.accept()
             return
 
+        if event.button() == Qt.LeftButton and mw.annotation_mode:
+            select_line = bool(event.modifiers() & Qt.ShiftModifier)
+            if mw.add_annotation_at_point(point, page_idx, select_line=select_line):
+                event.accept()
+                return
+
         if event.button() == Qt.RightButton:
             if event.modifiers() & Qt.ControlModifier:
                 if mw.remove_link_at_point(point, page_idx):

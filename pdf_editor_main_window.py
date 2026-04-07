@@ -11,10 +11,12 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication, QDialog, QFileDialog, QGraphicsScene,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidgetItem, QMainWindow,
-    QListView, QListWidget, QMenu, QMessageBox, QPushButton, QSplitter, QTextEdit, QVBoxLayout, QWidget
+    QListView, QListWidget, QMenu, QMessageBox, QPushButton, QSplitter, QTabWidget,
+    QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from pdf_editor_models import (
+    AnnotationEntry,
     CharInfo,
     LinkDeleteEntry,
     LinkEditEntry,
@@ -159,6 +161,9 @@ class MainWindow(QMainWindow):
         self.max_undo_steps = 120
 
         self.modified = False
+        self.save_path: Optional[Path] = None
+        self.annotations: List[AnnotationEntry] = []
+        self.annotation_mode: Optional[str] = None  # None, "highlight", "underline", "strikeout"
 
         self.search_query = ""
         self.search_results: List[Tuple[int, fitz.Rect]] = []
@@ -271,6 +276,21 @@ class MainWindow(QMainWindow):
         self.margin_btn.clicked.connect(self.open_margin_dialog)
         self.margin_btn.setToolTip("여백 / 크기 조정")
 
+        self.highlight_btn = QPushButton("형광펜")
+        self.highlight_btn.setCheckable(True)
+        self.highlight_btn.setToolTip("텍스트 하이라이트 모드")
+        self.highlight_btn.clicked.connect(lambda checked: self._set_annotation_mode("highlight" if checked else None))
+
+        self.underline_btn = QPushButton("밑줄")
+        self.underline_btn.setCheckable(True)
+        self.underline_btn.setToolTip("텍스트 밑줄 모드")
+        self.underline_btn.clicked.connect(lambda checked: self._set_annotation_mode("underline" if checked else None))
+
+        self.strikeout_btn = QPushButton("취소선")
+        self.strikeout_btn.setCheckable(True)
+        self.strikeout_btn.setToolTip("텍스트 취소선 모드")
+        self.strikeout_btn.clicked.connect(lambda checked: self._set_annotation_mode("strikeout" if checked else None))
+
         search_layout = QHBoxLayout()
         search_layout.setContentsMargins(0, 0, 0, 0)
         search_layout.setSpacing(8)
@@ -310,6 +330,9 @@ class MainWindow(QMainWindow):
         search_layout.addStretch(1)
         search_layout.addWidget(self.view_toggle_btn)
         search_layout.addWidget(self.margin_btn)
+        search_layout.addWidget(self.highlight_btn)
+        search_layout.addWidget(self.underline_btn)
+        search_layout.addWidget(self.strikeout_btn)
 
         guide_text = (
             "<b>단어 클릭</b>: 텍스트 수정 &nbsp;|&nbsp; "
@@ -353,18 +376,37 @@ class MainWindow(QMainWindow):
         self.sidebar_selection_label = QLabel("선택 없음")
         self.sidebar_selection_label.setObjectName("SidebarSelectionLabel")
 
+        # 페이지 탭
+        page_tab = QWidget()
+        page_tab_layout = QVBoxLayout(page_tab)
+        page_tab_layout.setContentsMargins(4, 4, 4, 4)
+        page_tab_layout.setSpacing(4)
+        page_tab_layout.addWidget(self.sidebar_hint)
+        page_tab_layout.addWidget(self.sidebar_selection_label)
+        page_tab_layout.addWidget(self.thumbnail_list)
+
+        # 북마크 탭
+        self.bookmark_tree = QTreeWidget()
+        self.bookmark_tree.setHeaderHidden(True)
+        self.bookmark_tree.itemClicked.connect(self._on_bookmark_clicked)
+        self.bookmark_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.bookmark_tree.customContextMenuRequested.connect(self._on_bookmark_context_menu)
+
+        bookmark_tab = QWidget()
+        bookmark_tab_layout = QVBoxLayout(bookmark_tab)
+        bookmark_tab_layout.setContentsMargins(4, 4, 4, 4)
+        bookmark_tab_layout.addWidget(self.bookmark_tree)
+
+        # 사이드바 탭 위젯
+        self.sidebar_tabs = QTabWidget()
+        self.sidebar_tabs.addTab(page_tab, "페이지")
+        self.sidebar_tabs.addTab(bookmark_tab, "북마크")
+
         sidebar_widget = QWidget(self)
         sidebar_layout = QVBoxLayout(sidebar_widget)
         sidebar_layout.setContentsMargins(8, 6, 8, 6)
-        sidebar_layout.setSpacing(8)
-        sidebar_header = QHBoxLayout()
-        sidebar_header.setContentsMargins(0, 0, 0, 0)
-        sidebar_header.addWidget(self.sidebar_title)
-        sidebar_header.addStretch(1)
-        sidebar_layout.addLayout(sidebar_header)
-        sidebar_layout.addWidget(self.sidebar_hint)
-        sidebar_layout.addWidget(self.sidebar_selection_label)
-        sidebar_layout.addWidget(self.thumbnail_list)
+        sidebar_layout.setSpacing(4)
+        sidebar_layout.addWidget(self.sidebar_tabs)
 
         self.main_splitter = QSplitter(Qt.Horizontal, self)
         self.main_splitter.addWidget(sidebar_widget)
@@ -397,9 +439,13 @@ class MainWindow(QMainWindow):
         self.open_action.setShortcuts([QKeySequence("Ctrl+O"), QKeySequence("Meta+O")])
         self.open_action.triggered.connect(self.open_pdf)
 
-        self.save_action = QAction("다른 이름으로 저장...", self)
+        self.save_action = QAction("저장", self)
         self.save_action.setShortcuts([QKeySequence("Ctrl+S"), QKeySequence("Meta+S")])
         self.save_action.triggered.connect(self.save_pdf)
+
+        self.save_as_action = QAction("다른 이름으로 저장...", self)
+        self.save_as_action.setShortcuts([QKeySequence("Ctrl+Shift+S"), QKeySequence("Meta+Shift+S")])
+        self.save_as_action.triggered.connect(self.save_pdf_as)
 
         self.undo_action = QAction("실행 취소", self)
         self.undo_action.setShortcuts([QKeySequence("Ctrl+Z"), QKeySequence("Meta+Z")])
@@ -433,11 +479,20 @@ class MainWindow(QMainWindow):
         self.rotate_page_action.setShortcuts([QKeySequence("Ctrl+Shift+R"), QKeySequence("Meta+Shift+R")])
         self.rotate_page_action.triggered.connect(self.rotate_selected_pages_clockwise)
 
+        self.insert_blank_page_action = QAction("빈 페이지 삽입", self)
+        self.insert_blank_page_action.triggered.connect(self.insert_blank_page)
+
+        self.insert_from_pdf_action = QAction("다른 PDF에서 페이지 삽입...", self)
+        self.insert_from_pdf_action.triggered.connect(self.insert_pages_from_pdf)
+
         self.margin_action = QAction("여백 / 크기 조정...", self)
         self.margin_action.triggered.connect(self.open_margin_dialog)
 
         self.remove_registration_marks_pick_action = QAction("인쇄 마크 제거 (클릭 지정)...", self)
         self.remove_registration_marks_pick_action.triggered.connect(self.begin_registration_mark_pick_mode)
+
+        self.export_image_action = QAction("페이지를 이미지로 내보내기...", self)
+        self.export_image_action.triggered.connect(self.export_pages_as_images)
 
         self.delete_page_action = QAction("페이지 삭제", self)
         self.delete_page_action.setShortcuts([QKeySequence("Meta+Backspace"), QKeySequence("Ctrl+Backspace")])
@@ -450,6 +505,7 @@ class MainWindow(QMainWindow):
 
         file_menu.addAction(self.open_action)
         file_menu.addAction(self.save_action)
+        file_menu.addAction(self.save_as_action)
 
         edit_menu.addAction(self.undo_action)
         edit_menu.addAction(self.redo_action)
@@ -460,9 +516,15 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self.duplicate_page_action)
         edit_menu.addAction(self.rotate_page_action)
         edit_menu.addSeparator()
+        edit_menu.addAction(self.insert_blank_page_action)
+        edit_menu.addAction(self.insert_from_pdf_action)
+        edit_menu.addSeparator()
         edit_menu.addAction(self.delete_page_action)
         edit_menu.addAction(self.margin_action)
         edit_menu.addAction(self.remove_registration_marks_pick_action)
+
+        file_menu.addSeparator()
+        file_menu.addAction(self.export_image_action)
 
         view_menu.addAction(self.continuous_view_action)
 
@@ -1347,6 +1409,16 @@ class MainWindow(QMainWindow):
             self.temp_margin_file = None
 
             self.doc = fitz.open(str(self.base_path))
+            if self.doc.needs_pass:
+                pw, ok = QInputDialog.getText(
+                    self, "비밀번호", "PDF 비밀번호를 입력하세요:",
+                    QLineEdit.EchoMode.Password
+                )
+                if not ok or not self.doc.authenticate(pw):
+                    QMessageBox.warning(self, "열기 실패", "비밀번호가 올바르지 않습니다.")
+                    self.doc.close()
+                    self.doc = None
+                    return
             self._page_words_cache.clear()
             self._page_norm_words_cache.clear()
             self._page_word_first_index_cache.clear()
@@ -1367,6 +1439,7 @@ class MainWindow(QMainWindow):
                 self.link_edits.clear()
                 self.new_links.clear()
                 self.link_deletes.clear()
+                self.annotations.clear()
                 self.undo_stack.clear()
                 self.redo_stack.clear()
                 self.modified = False
@@ -1380,6 +1453,7 @@ class MainWindow(QMainWindow):
                 self._cleanup_temp_file(Path(old_base))
 
             self._refresh_thumbnail_sidebar(force=True)
+            self._refresh_bookmark_tree()
             self._update_page_action_ui()
             self.render_page()
         except Exception as e:
@@ -1670,13 +1744,18 @@ class MainWindow(QMainWindow):
                 for page_idx in page_indices:
                     page = self.doc[page_idx]
                     for lnk in page.get_links():
-                        if lnk.get("kind") != fitz.LINK_GOTO:
+                        kind = lnk.get("kind")
+                        if kind == fitz.LINK_GOTO:
+                            brush = QBrush(QColor(255, 204, 0, 80))
+                            pen = QPen(QColor(255, 204, 0, 180))
+                        elif kind == fitz.LINK_URI:
+                            brush = QBrush(QColor(0, 180, 80, 80))
+                            pen = QPen(QColor(0, 180, 80, 180))
+                        else:
                             continue
                         r = fitz.Rect(lnk["from"])
                         if any(d.page_index == page_idx and fitz.Rect(d.link_rect).intersects(r) for d in self.link_deletes):
                             continue
-                        brush = QBrush(QColor(255, 204, 0, 80))
-                        pen = QPen(QColor(255, 204, 0, 180))
                         pen.setWidth(1)
                         self._add_overlay_rect(page_idx, r, pen, brush)
             except Exception:
@@ -1699,6 +1778,20 @@ class MainWindow(QMainWindow):
             pen = QPen(QColor(0, 0, 255, 160))
             pen.setWidth(1)
             self._add_overlay_rect(nl.page_index, nl.rect, pen, brush)
+
+        annot_colors = {
+            "highlight": QColor(255, 255, 0, 80),
+            "underline": QColor(0, 150, 255, 80),
+            "strikeout": QColor(255, 80, 80, 80),
+        }
+        for ann in self.annotations:
+            if ann.page_index not in self._page_scene_layouts:
+                continue
+            color = annot_colors.get(ann.annot_type, QColor(255, 255, 0, 80))
+            brush = QBrush(color)
+            pen = QPen(color.darker(120))
+            pen.setWidth(1)
+            self._add_overlay_rect(ann.page_index, ann.rect, pen, brush)
 
         page_num = self.current_page_index + 1
         total = len(self.doc)
@@ -1736,7 +1829,7 @@ class MainWindow(QMainWindow):
             page = target_doc[d.page_index]
             drect = fitz.Rect(d.link_rect)
             for lnk in list(page.get_links()):
-                if lnk.get("kind") != fitz.LINK_GOTO:
+                if lnk.get("kind") not in (fitz.LINK_GOTO, fitz.LINK_URI):
                     continue
                 lr = fitz.Rect(lnk["from"])
                 if self._significant_overlap(lr, drect, threshold=0.2) or drect.contains(lr.tl) or drect.contains(lr.br) or lr.contains(drect.tl) or lr.contains(drect.br):
@@ -1765,11 +1858,18 @@ class MainWindow(QMainWindow):
 
         for nl in self.new_links:
             page = target_doc[nl.page_index]
-            page.insert_link({
-                "kind": fitz.LINK_GOTO,
-                "from": nl.rect,
-                "page": nl.target_page
-            })
+            if nl.uri:
+                page.insert_link({
+                    "kind": fitz.LINK_URI,
+                    "from": nl.rect,
+                    "uri": nl.uri,
+                })
+            else:
+                page.insert_link({
+                    "kind": fitz.LINK_GOTO,
+                    "from": nl.rect,
+                    "page": nl.target_page,
+                })
 
     # ---------------- Actions ----------------
 
@@ -2529,7 +2629,7 @@ class MainWindow(QMainWindow):
 
         page = self.doc[target_page_idx]
         for lnk in page.get_links():
-            if lnk.get("kind") == fitz.LINK_GOTO and fitz.Rect(lnk["from"]).contains(click_point):
+            if lnk.get("kind") in (fitz.LINK_GOTO, fitz.LINK_URI) and fitz.Rect(lnk["from"]).contains(click_point):
                 self._push_undo_snapshot()
                 self.link_deletes.append(LinkDeleteEntry(target_page_idx, fitz.Rect(lnk["from"])))
                 self._mark_modified()
@@ -2565,37 +2665,100 @@ class MainWindow(QMainWindow):
         if not target_rect:
             return False
 
-        text_val, ok = QInputDialog.getInt(
-            self, "새 하이퍼링크 추가", "이동할 페이지 번호:",
-            self.current_page_index + 1,
-            1, len(self.doc)
-        )
-        if ok:
-            self._push_undo_snapshot()
+        result = self._show_new_link_dialog()
+        if result is None:
+            return False
 
-            page = self.doc[target_page_idx]
-            rrect = fitz.Rect(target_rect)
-            for lnk in page.get_links():
-                if lnk.get("kind") != fitz.LINK_GOTO:
-                    continue
-                try:
-                    lr = fitz.Rect(lnk["from"])
-                except Exception:
-                    continue
-                if self._significant_overlap(lr, rrect, threshold=0.35) or (rrect.contains(lr.tl) and rrect.contains(lr.br)):
-                    if not any(
-                        d.page_index == target_page_idx and self._significant_overlap(fitz.Rect(d.link_rect), lr, threshold=0.90)
-                        for d in self.link_deletes
-                    ):
-                        self.link_deletes.append(LinkDeleteEntry(target_page_idx, lr))
+        self._push_undo_snapshot()
 
-            self._append_new_link_dedup(target_page_idx, target_rect, text_val - 1)
-            self._mark_modified()
-            self._invalidate_render_cache()
-            self.render_page()
-            return True
+        page = self.doc[target_page_idx]
+        rrect = fitz.Rect(target_rect)
+        for lnk in page.get_links():
+            if lnk.get("kind") not in (fitz.LINK_GOTO, fitz.LINK_URI):
+                continue
+            try:
+                lr = fitz.Rect(lnk["from"])
+            except Exception:
+                continue
+            if self._significant_overlap(lr, rrect, threshold=0.35) or (rrect.contains(lr.tl) and rrect.contains(lr.br)):
+                if not any(
+                    d.page_index == target_page_idx and self._significant_overlap(fitz.Rect(d.link_rect), lr, threshold=0.90)
+                    for d in self.link_deletes
+                ):
+                    self.link_deletes.append(LinkDeleteEntry(target_page_idx, lr))
 
-        return False
+        if result["type"] == "uri":
+            nl = NewLinkEntry(target_page_idx, target_rect, 0, uri=result["uri"])
+            self.new_links.append(nl)
+        else:
+            self._append_new_link_dedup(target_page_idx, target_rect, result["page"])
+
+        self._mark_modified()
+        self._invalidate_render_cache()
+        self.render_page()
+        return True
+
+    def _show_new_link_dialog(self) -> Optional[dict]:
+        from PySide6.QtWidgets import QRadioButton, QButtonGroup
+        dialog = QDialog(self)
+        dialog.setWindowTitle("새 하이퍼링크 추가")
+        dialog.setFixedSize(380, 200)
+        layout = QVBoxLayout(dialog)
+
+        radio_page = QRadioButton("페이지 이동")
+        radio_url = QRadioButton("외부 URL")
+        radio_page.setChecked(True)
+        bg = QButtonGroup(dialog)
+        bg.addButton(radio_page)
+        bg.addButton(radio_url)
+        layout.addWidget(radio_page)
+
+        page_row = QHBoxLayout()
+        page_row.addWidget(QLabel("페이지:"))
+        page_input = QLineEdit(str(self.current_page_index + 1))
+        page_input.setFixedWidth(80)
+        page_row.addWidget(page_input)
+        page_row.addStretch()
+        layout.addLayout(page_row)
+
+        layout.addWidget(radio_url)
+        url_input = QLineEdit()
+        url_input.setPlaceholderText("https://...")
+        url_input.setEnabled(False)
+        layout.addWidget(url_input)
+
+        def _toggle(checked):
+            page_input.setEnabled(radio_page.isChecked())
+            url_input.setEnabled(radio_url.isChecked())
+        radio_page.toggled.connect(_toggle)
+
+        btn_row = QHBoxLayout()
+        ok_btn = QPushButton("확인")
+        cancel_btn = QPushButton("취소")
+        ok_btn.clicked.connect(dialog.accept)
+        cancel_btn.clicked.connect(dialog.reject)
+        btn_row.addStretch()
+        btn_row.addWidget(ok_btn)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+        if dialog.exec() != QDialog.Accepted:
+            return None
+
+        if radio_url.isChecked():
+            uri = url_input.text().strip()
+            if not uri:
+                return None
+            return {"type": "uri", "uri": uri}
+        else:
+            try:
+                pg = int(page_input.text())
+                if 1 <= pg <= len(self.doc):
+                    return {"type": "page", "page": pg - 1}
+            except ValueError:
+                pass
+            QMessageBox.warning(self, "오류", "유효한 페이지 번호를 입력하세요.")
+            return None
 
     # ---------------- Auto link ----------------
 
@@ -2817,28 +2980,40 @@ class MainWindow(QMainWindow):
     def save_pdf(self):
         if not self._has_open_doc():
             return
+        if self.save_path:
+            self._do_save(self.save_path)
+        else:
+            self.save_pdf_as()
 
-        src = self.base_path
+    def save_pdf_as(self):
+        if not self._has_open_doc():
+            return
+
         default_name = self.original_path.with_stem(self.original_path.stem + "_re")
         save_path, _ = QFileDialog.getSaveFileName(
             self,
-            "저장",
+            "다른 이름으로 저장",
             str(default_name),
             "PDF files (*.pdf)"
         )
         if not save_path:
             return
+        self._do_save(Path(save_path))
 
+    def _do_save(self, target: Path):
         try:
             current_page = self.current_page_index
+            src = self.base_path
 
             save_doc = fitz.open(str(src))
             self._apply_edits_to_doc(save_doc, preview_only=False)
-            save_doc.save(save_path)
+            self._apply_annotations_to_doc(save_doc)
+            save_doc.save(str(target))
             save_doc.close()
 
+            self.save_path = target
             QMessageBox.information(self, "성공", "저장 완료!")
-            self.load_pdf(Path(save_path), reset_edits=True)
+            self.load_pdf(target, reset_edits=True)
 
             if self.doc and 0 <= current_page < len(self.doc):
                 self.current_page_index = current_page
@@ -3251,6 +3426,293 @@ class MainWindow(QMainWindow):
         self._cleanup_temp_file(clipboard.pdf_path)
         if ok:
             self.statusBar().showMessage(f"페이지 {len(selected_pages)}개를 복제했습니다.", 2500)
+
+    # ---------------- Insert pages ----------------
+
+    def insert_blank_page(self):
+        if not self._has_open_doc():
+            QMessageBox.warning(self, "알림", "먼저 PDF 파일을 열어주세요.")
+            return
+        page = self.doc[self.current_page_index]
+        w, h = page.rect.width, page.rect.height
+
+        tmp = Path(tempfile.gettempdir()) / f"goodpdf_blank_{id(self)}.pdf"
+        blank_doc = fitz.open()
+        blank_doc.new_page(width=w, height=h)
+        blank_doc.save(str(tmp))
+        blank_doc.close()
+
+        clipboard = PageClipboard(
+            pdf_path=tmp, source_page_indices=[0],
+            link_edits=[], new_links=[], link_deletes=[], cut_mode=False,
+        )
+        insert_at = self.current_page_index + 1
+        self._push_undo_snapshot()
+        if self._paste_page_clipboard(clipboard, insert_at, keep_clipboard=False):
+            self.statusBar().showMessage("빈 페이지를 삽입했습니다.", 2500)
+        self._cleanup_temp_file(tmp)
+
+    def insert_pages_from_pdf(self):
+        if not self._has_open_doc():
+            QMessageBox.warning(self, "알림", "먼저 PDF 파일을 열어주세요.")
+            return
+
+        path, _ = QFileDialog.getOpenFileName(self, "PDF 선택", "", "PDF files (*.pdf)")
+        if not path:
+            return
+
+        try:
+            ext_doc = fitz.open(path)
+            if ext_doc.needs_pass:
+                pw, ok = QInputDialog.getText(self, "비밀번호", "PDF 비밀번호:", QLineEdit.EchoMode.Password)
+                if not ok or not ext_doc.authenticate(pw):
+                    QMessageBox.warning(self, "오류", "비밀번호가 올바르지 않습니다.")
+                    ext_doc.close()
+                    return
+        except Exception as e:
+            QMessageBox.critical(self, "열기 실패", f"오류:\n{e}")
+            return
+
+        total = len(ext_doc)
+        text, ok = QInputDialog.getText(
+            self, "페이지 범위",
+            f"삽입할 페이지 범위 (1-{total}):\n예: 1-5, 3, 7",
+            text=f"1-{total}"
+        )
+        if not ok or not text.strip():
+            ext_doc.close()
+            return
+
+        pages = self._parse_page_range(text.strip(), total)
+        if not pages:
+            QMessageBox.warning(self, "오류", "유효한 페이지 범위를 입력하세요.")
+            ext_doc.close()
+            return
+
+        tmp = Path(tempfile.gettempdir()) / f"goodpdf_insert_{id(self)}.pdf"
+        tmp_doc = fitz.open()
+        for p in pages:
+            tmp_doc.insert_pdf(ext_doc, from_page=p, to_page=p)
+        tmp_doc.save(str(tmp))
+        tmp_doc.close()
+        ext_doc.close()
+
+        clipboard = PageClipboard(
+            pdf_path=tmp, source_page_indices=list(range(len(pages))),
+            link_edits=[], new_links=[], link_deletes=[], cut_mode=False,
+        )
+        insert_at = self.current_page_index + 1
+        self._push_undo_snapshot()
+        if self._paste_page_clipboard(clipboard, insert_at, keep_clipboard=False):
+            self.statusBar().showMessage(f"{len(pages)}개 페이지를 삽입했습니다.", 2500)
+        self._cleanup_temp_file(tmp)
+
+    @staticmethod
+    def _parse_page_range(text: str, total: int) -> List[int]:
+        pages = []
+        for part in text.split(","):
+            part = part.strip()
+            if "-" in part:
+                try:
+                    a, b = part.split("-", 1)
+                    start, end = int(a.strip()), int(b.strip())
+                    pages.extend(range(max(1, start) - 1, min(total, end)))
+                except ValueError:
+                    continue
+            else:
+                try:
+                    p = int(part)
+                    if 1 <= p <= total:
+                        pages.append(p - 1)
+                except ValueError:
+                    continue
+        return pages
+
+    # ---------------- Export images ----------------
+
+    def export_pages_as_images(self):
+        if not self._has_open_doc():
+            QMessageBox.warning(self, "알림", "먼저 PDF 파일을 열어주세요.")
+            return
+
+        selected = self._selected_page_indices()
+        if len(selected) <= 1:
+            selected = [self.current_page_index]
+
+        dpi, ok = QInputDialog.getInt(self, "DPI 설정", "내보내기 DPI:", 300, 72, 600)
+        if not ok:
+            return
+
+        scale = dpi / 72.0
+
+        if len(selected) == 1:
+            default_name = f"{self.original_path.stem}_page{selected[0]+1}.png"
+            save_path, _ = QFileDialog.getSaveFileName(
+                self, "이미지 저장", default_name, "PNG (*.png);;JPEG (*.jpg)"
+            )
+            if not save_path:
+                return
+            page = self.doc[selected[0]]
+            pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
+            pix.save(save_path)
+            QMessageBox.information(self, "완료", f"이미지를 저장했습니다:\n{save_path}")
+        else:
+            dir_path = QFileDialog.getExistingDirectory(self, "저장 폴더 선택")
+            if not dir_path:
+                return
+            for idx in selected:
+                page = self.doc[idx]
+                pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
+                out = Path(dir_path) / f"{self.original_path.stem}_page{idx+1}.png"
+                pix.save(str(out))
+            QMessageBox.information(self, "완료", f"{len(selected)}개 페이지를 이미지로 저장했습니다.")
+
+    # ---------------- Bookmarks ----------------
+
+    def _refresh_bookmark_tree(self):
+        self.bookmark_tree.clear()
+        if not self.doc:
+            return
+        try:
+            toc = self.doc.get_toc()
+        except Exception:
+            return
+        if not toc:
+            item = QTreeWidgetItem(self.bookmark_tree, ["(북마크 없음)"])
+            item.setData(0, Qt.UserRole, -1)
+            return
+
+        stack: List[QTreeWidgetItem] = []
+        for level, title, page in toc:
+            item = QTreeWidgetItem()
+            item.setText(0, title)
+            item.setData(0, Qt.UserRole, page - 1)
+
+            while len(stack) >= level:
+                stack.pop()
+
+            if stack:
+                stack[-1].addChild(item)
+            else:
+                self.bookmark_tree.addTopLevelItem(item)
+            stack.append(item)
+
+        self.bookmark_tree.expandAll()
+
+    def _on_bookmark_clicked(self, item: QTreeWidgetItem, column: int):
+        page = item.data(0, Qt.UserRole)
+        if page is not None and page >= 0 and self.doc and page < len(self.doc):
+            self.current_page_index = page
+            self._thumbnail_selected_pages = {page}
+            self.render_page()
+
+    def _on_bookmark_context_menu(self, pos):
+        if not self.doc:
+            return
+        menu = QMenu(self)
+        add_action = menu.addAction("북마크 추가")
+        item = self.bookmark_tree.itemAt(pos)
+        edit_action = delete_action = None
+        if item and item.data(0, Qt.UserRole) is not None and item.data(0, Qt.UserRole) >= 0:
+            edit_action = menu.addAction("편집")
+            delete_action = menu.addAction("삭제")
+
+        action = menu.exec(self.bookmark_tree.viewport().mapToGlobal(pos))
+        if action == add_action:
+            self._add_bookmark()
+        elif action == edit_action and item:
+            self._edit_bookmark(item)
+        elif action == delete_action and item:
+            self._delete_bookmark(item)
+
+    def _add_bookmark(self):
+        title, ok = QInputDialog.getText(self, "북마크 추가", "북마크 이름:")
+        if not ok or not title.strip():
+            return
+        page = self.current_page_index + 1
+        toc = self.doc.get_toc() or []
+        toc.append([1, title.strip(), page])
+        self.doc.set_toc(toc)
+        self._mark_modified()
+        self._refresh_bookmark_tree()
+
+    def _edit_bookmark(self, item: QTreeWidgetItem):
+        old_title = item.text(0)
+        old_page = item.data(0, Qt.UserRole)
+        title, ok = QInputDialog.getText(self, "북마크 편집", "이름:", text=old_title)
+        if not ok or not title.strip():
+            return
+        toc = self.doc.get_toc() or []
+        for entry in toc:
+            if entry[1] == old_title and entry[2] == old_page + 1:
+                entry[1] = title.strip()
+                break
+        self.doc.set_toc(toc)
+        self._mark_modified()
+        self._refresh_bookmark_tree()
+
+    def _delete_bookmark(self, item: QTreeWidgetItem):
+        title = item.text(0)
+        page = item.data(0, Qt.UserRole)
+        toc = self.doc.get_toc() or []
+        toc = [e for e in toc if not (e[1] == title and e[2] == page + 1)]
+        self.doc.set_toc(toc)
+        self._mark_modified()
+        self._refresh_bookmark_tree()
+
+    # ---------------- Annotations ----------------
+
+    def _set_annotation_mode(self, mode: Optional[str]):
+        self.annotation_mode = mode
+        self.highlight_btn.setChecked(mode == "highlight")
+        self.underline_btn.setChecked(mode == "underline")
+        self.strikeout_btn.setChecked(mode == "strikeout")
+        style_on = "background-color: #ffcc00; font-weight: bold; border-radius: 4px; padding: 4px;"
+        style_off = ""
+        self.highlight_btn.setStyleSheet(style_on if mode == "highlight" else style_off)
+        self.underline_btn.setStyleSheet(style_on if mode == "underline" else style_off)
+        self.strikeout_btn.setStyleSheet(style_on if mode == "strikeout" else style_off)
+
+    def add_annotation_at_point(self, click_point: fitz.Point, page_index: Optional[int] = None, select_line: bool = False) -> bool:
+        if not self.doc or not self.annotation_mode:
+            return False
+        target_page_idx = self.current_page_index if page_index is None else page_index
+        text_target = self.text_edit_support.find_text_target_at_point(target_page_idx, click_point, select_line=select_line)
+        if text_target is None:
+            return False
+        target_rect = self.text_edit_support.effective_target_rect(text_target, allow_overflow_right=False)
+        if not target_rect:
+            return False
+
+        self._push_undo_snapshot()
+        self.annotations.append(AnnotationEntry(
+            page_index=target_page_idx,
+            rect=fitz.Rect(target_rect),
+            annot_type=self.annotation_mode,
+        ))
+        self._mark_modified()
+        self._invalidate_render_cache()
+        self.render_page()
+        return True
+
+    def _apply_annotations_to_doc(self, target_doc: fitz.Document):
+        for ann in self.annotations:
+            if ann.page_index >= len(target_doc):
+                continue
+            page = target_doc[ann.page_index]
+            quad = fitz.Quad(ann.rect)
+            try:
+                if ann.annot_type == "highlight":
+                    a = page.add_highlight_annot(quad)
+                elif ann.annot_type == "underline":
+                    a = page.add_underline_annot(quad)
+                elif ann.annot_type == "strikeout":
+                    a = page.add_strikeout_annot(quad)
+                else:
+                    continue
+                a.update()
+            except Exception:
+                pass
 
     def rotate_pages_clockwise(self, page_indices: List[int], push_undo: bool = True):
         if not self._has_open_doc():
