@@ -1074,19 +1074,34 @@ class MainWindow(QMainWindow):
         if item_rect.isNull():
             return None
 
-        page_rect = self.doc[page_idx].rect
+        icon = item.icon()
+        if icon.isNull():
+            return None
+
         icon_size = self.thumbnail_list.iconSize()
-        scale = min(
-            float(icon_size.width()) / max(1.0, float(page_rect.width)),
-            float(icon_size.height()) / max(1.0, float(page_rect.height)),
-        )
-        image_w = max(1.0, float(page_rect.width) * scale)
-        image_h = max(1.0, float(page_rect.height) * scale)
+        actual_sizes = icon.availableSizes()
+        if actual_sizes:
+            actual = actual_sizes[0]
+            aspect = float(actual.width()) / max(1.0, float(actual.height()))
+            if float(actual.width()) / max(1, icon_size.width()) > float(actual.height()) / max(1, icon_size.height()):
+                image_w = float(icon_size.width())
+                image_h = image_w / max(0.01, aspect)
+            else:
+                image_h = float(icon_size.height())
+                image_w = image_h * aspect
+        else:
+            page_rect = self.doc[page_idx].rect
+            scale = min(
+                float(icon_size.width()) / max(1.0, float(page_rect.width)),
+                float(icon_size.height()) / max(1.0, float(page_rect.height)),
+            )
+            image_w = max(1.0, float(page_rect.width) * scale)
+            image_h = max(1.0, float(page_rect.height) * scale)
 
         grid = self.thumbnail_list.gridSize()
         label_h = self.thumbnail_list.fontMetrics().height() + 6
         icon_area_h = float(grid.height()) - label_h
-        icon_area_w = float(grid.width())
+        icon_area_w = float(item_rect.width())
 
         image_x = float(item_rect.left()) + (icon_area_w - image_w) * 0.5
         image_y = float(item_rect.top()) + (icon_area_h - image_h) * 0.5
