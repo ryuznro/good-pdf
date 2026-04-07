@@ -1865,8 +1865,8 @@ class TextEditSupport:
         rect = fitz.Rect(target.rect)
         size = max(2.0, float(target.font_size or 11.0))
         baseline = float(target.origin.y)
-        asc = float(target.ascender) if target.ascender else 0.0
-        desc = float(target.descender) if target.descender else 0.0
+        asc = float(getattr(target, "ascender", 0.0) or 0.0)
+        desc = float(getattr(target, "descender", 0.0) or 0.0)
         top_ratio = 0.84
         bottom_ratio = 0.30
         if asc > 0:
