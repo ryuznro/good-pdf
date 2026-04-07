@@ -357,6 +357,11 @@ class MainWindow(QMainWindow):
         self.margin_btn.clicked.connect(self.open_margin_dialog)
         self.margin_btn.setToolTip("여백 / 크기 조정")
 
+        self.zoom_label = QLabel("300%")
+        self.zoom_label.setFixedWidth(50)
+        self.zoom_label.setAlignment(Qt.AlignCenter)
+        self.zoom_label.setStyleSheet("color: #666666; font-size: 11px;")
+
         self.highlight_btn = QPushButton("형광펜")
         self.highlight_btn.setCheckable(True)
         self.highlight_btn.setToolTip("텍스트 하이라이트 모드")
@@ -409,6 +414,7 @@ class MainWindow(QMainWindow):
         search_layout.addWidget(self.search_clear_btn)
         search_layout.addWidget(self.search_label)
         search_layout.addStretch(1)
+        search_layout.addWidget(self.zoom_label)
         search_layout.addWidget(self.view_toggle_btn)
         search_layout.addWidget(self.margin_btn)
         search_layout.addWidget(self.highlight_btn)
@@ -575,6 +581,16 @@ class MainWindow(QMainWindow):
         self.export_image_action = QAction("페이지를 이미지로 내보내기...", self)
         self.export_image_action.triggered.connect(self.export_pages_as_images)
 
+        self.merge_pdf_action = QAction("PDF 병합...", self)
+        self.merge_pdf_action.triggered.connect(self.merge_pdfs)
+
+        self.print_action = QAction("인쇄...", self)
+        self.print_action.setShortcuts([QKeySequence("Ctrl+P"), QKeySequence("Meta+P")])
+        self.print_action.triggered.connect(self.print_pdf)
+
+        self.insert_image_action = QAction("이미지 삽입...", self)
+        self.insert_image_action.triggered.connect(self.insert_image_to_page)
+
         self.delete_page_action = QAction("페이지 삭제", self)
         self.delete_page_action.setShortcuts([QKeySequence("Meta+Backspace"), QKeySequence("Ctrl+Backspace")])
         self.delete_page_action.triggered.connect(self.delete_selected_pages)
@@ -606,6 +622,12 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
         file_menu.addAction(self.export_image_action)
+        file_menu.addAction(self.merge_pdf_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.print_action)
+
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.insert_image_action)
 
         view_menu.addAction(self.continuous_view_action)
 
@@ -911,6 +933,7 @@ class MainWindow(QMainWindow):
             self.base_path,
             self.temp_margin_file,
             self.current_page_index,
+            [AnnotationEntry(a.page_index, fitz.Rect(a.rect), a.annot_type, a.color) for a in self.annotations],
         )
         self.undo_stack.append(snapshot)
         self.redo_stack.clear()
@@ -918,7 +941,11 @@ class MainWindow(QMainWindow):
             self.undo_stack.pop(0)
 
     def _restore_snapshot(self, snapshot):
-        prev_links, prev_new_links, prev_deletes, prev_base_path, prev_temp_margin, prev_page_index = snapshot
+        if len(snapshot) >= 7:
+            prev_links, prev_new_links, prev_deletes, prev_base_path, prev_temp_margin, prev_page_index, prev_annotations = snapshot
+            self.annotations = prev_annotations
+        else:
+            prev_links, prev_new_links, prev_deletes, prev_base_path, prev_temp_margin, prev_page_index = snapshot
         self.link_edits = prev_links
         self.new_links = prev_new_links
         self.link_deletes = prev_deletes
@@ -1890,6 +1917,10 @@ class MainWindow(QMainWindow):
             page_border = QPen(QColor(210, 210, 210))
             page_border.setWidth(1)
             self.scene.addRect(x0, y0, width, height, page_border)
+            page_num_text = self.scene.addText(f"{page_idx + 1}")
+            page_num_text.setDefaultTextColor(QColor(180, 180, 180))
+            text_w = page_num_text.boundingRect().width()
+            page_num_text.setPos(x0 + (width - text_w) * 0.5, y0 + height + 1)
             max_width = max(max_width, x0 + width + self._scene_padding_x)
             max_bottom = max(max_bottom, y0 + height + self._scene_padding_y)
 
@@ -2085,8 +2116,13 @@ class MainWindow(QMainWindow):
         if zoom_index is None:
             zoom_index = min(range(len(self.zoom_levels)), key=lambda i: abs(self.zoom_levels[i] - clamped_zoom))
         self.zoom_index = int(zoom_index)
+        self._update_zoom_label()
         self._scroll_to_current_after_render = False
         self.render_page()
+
+    def _update_zoom_label(self):
+        pct = int(round(float(self.zoom) * 100))
+        self.zoom_label.setText(f"{pct}%")
 
     def adjust_zoom_by_factor(self, factor: float, anchor_viewport_pos=None):
         if not self._has_open_doc():
@@ -3734,6 +3770,156 @@ class MainWindow(QMainWindow):
                 out = Path(dir_path) / f"{self.original_path.stem}_page{idx+1}.png"
                 pix.save(str(out))
             QMessageBox.information(self, "완료", f"{len(selected)}개 페이지를 이미지로 저장했습니다.")
+
+    # ---------------- Merge PDFs ----------------
+
+    def merge_pdfs(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "병합할 PDF 선택", "", "PDF files (*.pdf)")
+        if not paths:
+            return
+        save_path, _ = QFileDialog.getSaveFileName(self, "병합 결과 저장", "", "PDF files (*.pdf)")
+        if not save_path:
+            return
+        try:
+            merged = fitz.open()
+            for p in paths:
+                src = fitz.open(p)
+                merged.insert_pdf(src)
+                src.close()
+            merged.save(save_path)
+            merged.close()
+            QMessageBox.information(self, "완료", f"{len(paths)}개 PDF를 병합했습니다:\n{save_path}")
+            ret = QMessageBox.question(self, "열기", "병합된 PDF를 열까요?", QMessageBox.Yes | QMessageBox.No)
+            if ret == QMessageBox.Yes:
+                self.load_pdf(Path(save_path), reset_edits=True)
+        except Exception as e:
+            QMessageBox.critical(self, "병합 오류", f"오류:\n{e}")
+
+    # ---------------- Print ----------------
+
+    def print_pdf(self):
+        if not self._has_open_doc():
+            QMessageBox.warning(self, "알림", "먼저 PDF 파일을 열어주세요.")
+            return
+        from PySide6.QtPrintSupport import QPrinter, QPrintDialog
+        from PySide6.QtGui import QPainter
+
+        printer = QPrinter(QPrinter.HighResolution)
+        dialog = QPrintDialog(printer, self)
+        if dialog.exec() != QPrintDialog.Accepted:
+            return
+
+        painter = QPainter()
+        if not painter.begin(printer):
+            return
+        try:
+            page_range = range(len(self.doc))
+            for i, page_idx in enumerate(page_range):
+                if i > 0:
+                    printer.newPage()
+                page = self.doc[page_idx]
+                printer_rect = painter.viewport()
+                scale = min(
+                    printer_rect.width() / max(1, page.rect.width),
+                    printer_rect.height() / max(1, page.rect.height),
+                )
+                pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+                image = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format_RGB888)
+                target_w = int(page.rect.width * scale)
+                target_h = int(page.rect.height * scale)
+                x_off = (printer_rect.width() - target_w) // 2
+                y_off = (printer_rect.height() - target_h) // 2
+                from PySide6.QtCore import QRect
+                painter.drawImage(QRect(x_off, y_off, target_w, target_h), image)
+        finally:
+            painter.end()
+        self.statusBar().showMessage("인쇄 완료!", 2500)
+
+    # ---------------- Insert image ----------------
+
+    def insert_image_to_page(self):
+        if not self._has_open_doc():
+            QMessageBox.warning(self, "알림", "먼저 PDF 파일을 열어주세요.")
+            return
+
+        img_path, _ = QFileDialog.getOpenFileName(
+            self, "이미지 선택", "", "Images (*.png *.jpg *.jpeg *.bmp *.gif *.tiff)"
+        )
+        if not img_path:
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("이미지 삽입 위치")
+        dialog.setFixedSize(300, 180)
+        layout = QVBoxLayout(dialog)
+
+        layout.addWidget(QLabel("삽입 위치 (mm):"))
+        grid = QHBoxLayout()
+        grid.addWidget(QLabel("X:"))
+        x_input = QLineEdit("10")
+        x_input.setFixedWidth(60)
+        grid.addWidget(x_input)
+        grid.addWidget(QLabel("Y:"))
+        y_input = QLineEdit("10")
+        y_input.setFixedWidth(60)
+        grid.addStretch()
+        layout.addLayout(grid)
+
+        size_row = QHBoxLayout()
+        size_row.addWidget(QLabel("폭 (mm):"))
+        w_input = QLineEdit("50")
+        w_input.setFixedWidth(60)
+        size_row.addWidget(w_input)
+        size_row.addStretch()
+        layout.addLayout(size_row)
+
+        btn_row = QHBoxLayout()
+        ok_btn = QPushButton("삽입")
+        cancel_btn = QPushButton("취소")
+        ok_btn.clicked.connect(dialog.accept)
+        cancel_btn.clicked.connect(dialog.reject)
+        btn_row.addStretch()
+        btn_row.addWidget(ok_btn)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        try:
+            mm2pt = 72.0 / 25.4
+            x_pt = float(x_input.text()) * mm2pt
+            y_pt = float(y_input.text()) * mm2pt
+            w_pt = float(w_input.text()) * mm2pt
+
+            from PIL import Image as PILImage
+            with PILImage.open(img_path) as img:
+                aspect = img.height / max(1, img.width)
+            h_pt = w_pt * aspect
+
+            self._push_undo_snapshot()
+
+            tmp_path = Path(tempfile.gettempdir()) / f"goodpdf_imginsert_{id(self)}.pdf"
+            src_doc = fitz.open(str(self.base_path))
+            page = src_doc[self.current_page_index]
+            rect = fitz.Rect(x_pt, y_pt, x_pt + w_pt, y_pt + h_pt)
+            page.insert_image(rect, filename=img_path)
+            src_doc.save(str(tmp_path))
+            src_doc.close()
+
+            saved_h = self.view.horizontalScrollBar().value()
+            saved_v = self.view.verticalScrollBar().value()
+
+            old_base = self.base_path
+            old_temp = self.temp_margin_file
+            self._activate_temp_pdf(tmp_path, old_base, old_temp, structure_changed=False)
+            self._mark_modified()
+            self.render_page()
+            self.view.horizontalScrollBar().setValue(saved_h)
+            self.view.verticalScrollBar().setValue(saved_v)
+            self.statusBar().showMessage("이미지를 삽입했습니다.", 2500)
+        except Exception as e:
+            QMessageBox.critical(self, "이미지 삽입 오류", f"오류:\n{e}")
 
     # ---------------- Bookmarks ----------------
 
