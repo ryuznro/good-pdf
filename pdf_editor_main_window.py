@@ -1847,6 +1847,9 @@ class MainWindow(QMainWindow):
             if bg_pages:
                 self._start_background_render(bg_pages)
 
+        saved_h = self.view.horizontalScrollBar().value()
+        saved_v = self.view.verticalScrollBar().value()
+
         self.scene.clear()
         self.current_spans_by_page = {}
         max_width = 0.0
@@ -1883,6 +1886,8 @@ class MainWindow(QMainWindow):
                 max_width = x0 + width + self._scene_padding_x
                 max_bottom = y0 + height + self._scene_padding_y
         self.scene.setSceneRect(0, 0, max_width, max_bottom)
+        self.view.horizontalScrollBar().setValue(saved_h)
+        self.view.verticalScrollBar().setValue(saved_v)
 
         no_pen = QPen(Qt.NoPen)
 
