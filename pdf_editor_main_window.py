@@ -1343,7 +1343,27 @@ class MainWindow(QMainWindow):
     def _refresh_visible_after_scroll(self):
         if not self._has_open_doc():
             return
+        if self.continuous_view:
+            self._sync_current_page_from_scroll()
         self.render_page()
+
+    def _sync_current_page_from_scroll(self):
+        if not self._page_scene_layouts:
+            return
+        view_rect = self.view.mapToScene(self.view.viewport().rect()).boundingRect()
+        center_y = view_rect.center().y()
+        best_page = self.current_page_index
+        best_dist = float("inf")
+        for page_idx, (_, y0, _, height) in self._page_scene_layouts.items():
+            page_center = y0 + height / 2
+            dist = abs(page_center - center_y)
+            if dist < best_dist:
+                best_dist = dist
+                best_page = page_idx
+        if best_page != self.current_page_index:
+            self.current_page_index = best_page
+            self._thumbnail_selected_pages = {best_page}
+            self._ensure_current_thumbnail_visible()
 
     def _start_background_render(self, page_indices: List[int]):
         if self._render_worker and self._render_worker.isRunning():
