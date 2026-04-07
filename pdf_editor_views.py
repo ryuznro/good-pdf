@@ -1,8 +1,8 @@
 from typing import Optional, TYPE_CHECKING
 
-from PySide6.QtCore import QEvent, Qt
-from PySide6.QtGui import QPainter
-from PySide6.QtWidgets import QAbstractItemView, QGraphicsView, QListWidget
+from PySide6.QtCore import QEvent, QPropertyAnimation, QTimer, Qt
+from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtWidgets import QAbstractItemView, QGraphicsEllipseItem, QGraphicsView, QListWidget
 
 if TYPE_CHECKING:
     from pdf_editor_main_window import MainWindow
@@ -76,11 +76,29 @@ class PdfView(QGraphicsView):
         if self.main_window:
             self.main_window.queue_visible_refresh()
 
+    def _show_click_ripple(self, viewport_pos):
+        scene_pos = self.mapToScene(viewport_pos)
+        radius = 8.0
+        item = QGraphicsEllipseItem(
+            scene_pos.x() - radius, scene_pos.y() - radius,
+            radius * 2, radius * 2,
+        )
+        pen = QPen(QColor(0, 120, 255, 180))
+        pen.setWidthF(1.5)
+        item.setPen(pen)
+        item.setBrush(QColor(0, 120, 255, 50))
+        item.setZValue(9999)
+        self.scene().addItem(item)
+        QTimer.singleShot(200, lambda: self.scene().removeItem(item) if item.scene() else None)
+
     def mousePressEvent(self, event):
         mw = self.main_window
         if not mw:
             super().mousePressEvent(event)
             return
+
+        if event.button() == Qt.LeftButton:
+            self._show_click_ripple(event.position().toPoint())
 
         scene_pos = self.mapToScene(event.position().toPoint())
         page_idx, point = mw.map_scene_to_page_point(scene_pos)
