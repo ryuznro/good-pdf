@@ -3022,7 +3022,8 @@ class MainWindow(QMainWindow):
             self.modified = False
 
         except Exception as e:
-            QMessageBox.critical(self, "저장 오류", f"오류:\n{e}")
+            import traceback
+            QMessageBox.critical(self, "저장 오류", f"오류:\n{e}\n\n{traceback.format_exc()}")
 
     def closeEvent(self, event):
         if self.modified:
@@ -3700,14 +3701,14 @@ class MainWindow(QMainWindow):
             if ann.page_index >= len(target_doc):
                 continue
             page = target_doc[ann.page_index]
-            quad = fitz.Quad(ann.rect)
+            r = fitz.Rect(ann.rect)
             try:
                 if ann.annot_type == "highlight":
-                    a = page.add_highlight_annot(quad)
+                    a = page.add_highlight_annot(quads=[r])
                 elif ann.annot_type == "underline":
-                    a = page.add_underline_annot(quad)
+                    a = page.add_underline_annot(quads=[r])
                 elif ann.annot_type == "strikeout":
-                    a = page.add_strikeout_annot(quad)
+                    a = page.add_strikeout_annot(quads=[r])
                 else:
                     continue
                 a.update()
