@@ -374,13 +374,25 @@ class TextEditSupport:
         self,
         source_font_name: str,
         resource: _SystemFontResource,
-    ) -> Tuple[int, int, int, int, int]:
+        source_bold: bool = False,
+        source_italic: bool = False,
+    ) -> Tuple[int, int, int, int, int, int]:
         source_norm = self._normalize_font_lookup_key(source_font_name)
         source_tokens = set(self._font_lookup_tokens(source_font_name))
         if not source_norm and not source_tokens:
-            return (3, 0, 99, 99, 999)
+            return (3, 0, 0, 99, 99, 999)
 
-        best = (3, 0, 99, 99, 999)
+        src_lower = (source_font_name or "").lower()
+        src_bold = source_bold or any(k in src_lower for k in ("bold", "heavy", "black"))
+        src_italic = source_italic or any(k in src_lower for k in ("italic", "oblique"))
+
+        style_penalty = 0
+        if src_bold != resource.is_bold:
+            style_penalty += 1
+        if src_italic != resource.is_italic:
+            style_penalty += 1
+
+        best = (3, 0, style_penalty, 99, 99, 999)
         for candidate in (resource.display_name, resource.path.stem):
             candidate_norm = self._normalize_font_lookup_key(candidate)
             candidate_tokens = set(self._font_lookup_tokens(candidate))
@@ -396,7 +408,7 @@ class TextEditSupport:
 
             missing = max(0, len(source_tokens) - shared)
             extra = max(0, len(candidate_tokens) - shared)
-            score = (relation, -shared, missing, extra, len(candidate_norm or candidate))
+            score = (relation, -shared, style_penalty, missing, extra, len(candidate_norm or candidate))
             if score < best:
                 best = score
         return best
@@ -1853,8 +1865,16 @@ class TextEditSupport:
         rect = fitz.Rect(target.rect)
         size = max(2.0, float(target.font_size or 11.0))
         baseline = float(target.origin.y)
-        rect.y0 = baseline - size * 0.82
-        rect.y1 = baseline + size * 0.28
+        asc = float(target.ascender) if target.ascender else 0.0
+        desc = float(target.descender) if target.descender else 0.0
+        top_ratio = 0.84
+        bottom_ratio = 0.30
+        if asc > 0:
+            top_ratio = min(0.92, max(0.80, asc * 0.95))
+        if desc < 0:
+            bottom_ratio = min(0.38, max(0.24, (-desc) * 0.70))
+        rect.y0 = baseline - size * top_ratio
+        rect.y1 = baseline + size * bottom_ratio
         return rect
 
     def _is_safe_edit_rect(self, target: SimpleTextTarget, edit_rect: fitz.Rect) -> bool:
@@ -2075,10 +2095,10 @@ class TextEditSupport:
     def _piece_erase_rect(self, rect: fitz.Rect, baseline_y: float, font_size: float) -> fitz.Rect:
         size = max(2.0, float(font_size or 11.0))
         out = fitz.Rect(rect)
-        out.y0 = baseline_y - size * 0.82
-        out.y1 = baseline_y + size * 0.28
-        out.x0 -= max(0.4, size * 0.02)
-        out.x1 += max(0.4, size * 0.02)
+        out.y0 = baseline_y - size * 0.84
+        out.y1 = baseline_y + size * 0.30
+        out.x0 -= max(0.5, size * 0.03)
+        out.x1 += max(0.5, size * 0.03)
         return out
 
     def _sample_background_fill(
@@ -2538,14 +2558,16 @@ class TextEditSupport:
             )
             return False
         if (not allow_overflow_right) and replacement and width is not None:
-            max_width = float(edit_rect.width) * 1.02
+            max_width = float(edit_rect.width) * 1.10
             if width > max_width:
-                QMessageBox.warning(
+                ret = QMessageBox.question(
                     w,
                     "텍스트 폭 초과",
-                    "입력한 텍스트가 선택된 영역보다 깁니다.\n문장을 더 짧게 입력해 주세요."
+                    f"입력한 텍스트가 선택 영역보다 {int((width / float(edit_rect.width) - 1) * 100)}% 깁니다.\n그래도 적용하시겠습니까?",
+                    QMessageBox.Yes | QMessageBox.No,
                 )
-                return False
+                if ret != QMessageBox.Yes:
+                    return False
 
         w._push_undo_snapshot()
 
