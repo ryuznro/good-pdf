@@ -54,7 +54,7 @@ jobs:
         run: pyinstaller -y "Good PDF.spec"
 
       - name: Create ZIP archive
-        run: cd dist && ditto -c -k --sequesterRsrc "Good PDF.app" "Good-PDF-macOS.zip"
+        run: cd dist && ditto -c -k --sequesterRsrc --keepParent "Good PDF.app" "Good-PDF-macOS.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
