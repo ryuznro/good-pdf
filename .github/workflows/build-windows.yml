@@ -1,4 +1,4 @@
-name: Build Windows
+name: Build
 
 on:
   push:
@@ -36,9 +36,51 @@ jobs:
           name: Good-PDF-Windows
           path: dist/Good-PDF-Windows.zip
 
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build with PyInstaller
+        run: pyinstaller -y "Good PDF.spec"
+
+      - name: Create ZIP archive
+        run: cd dist && ditto -c -k --sequesterRsrc "Good PDF.app" "Good-PDF-macOS.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Good-PDF-macOS
+          path: dist/Good-PDF-macOS.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Good-PDF-Windows
+          path: dist/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: Good-PDF-macOS
+          path: dist/
+
       - name: Create Release
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/Good-PDF-Windows.zip
+          files: |
+            dist/Good-PDF-Windows.zip
+            dist/Good-PDF-macOS.zip
           generate_release_notes: true
