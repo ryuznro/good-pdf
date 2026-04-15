@@ -13,6 +13,33 @@ from pdf_editor_models import CharInfo, SpanInfo
 from pdf_text_edit_dialog import run_text_edit_dialog
 
 
+# ---------------------------------------------------------------------------
+# Font priority tables (module-level constants — never mutated at runtime)
+# 낮은 인덱스일수록 선호도가 높음. 텍스트에 한글이 포함되는지, serif 를
+# 요구하는지에 따라 네 가지 테이블 중 하나가 선택된다.
+# ---------------------------------------------------------------------------
+_PREF_HANGUL_SERIF: Tuple[str, ...] = (
+    "applemyungjo", "nanummyeongjo", "kopubbatang", "batang",
+    "timesnewroman", "times", "georgia", "baskerville", "aptosserif",
+)
+_PREF_HANGUL_SANS: Tuple[str, ...] = (
+    "applesdgothicneo", "applegothic", "pretendard",
+    "nanumgothic", "nanumsquare", "malgun",
+    "arialunicode", "arial", "helvetica", "aptos", "sfpro", "sfns",
+)
+_PREF_LATIN_SERIF: Tuple[str, ...] = (
+    "newbaskerville", "baskerville", "timesnewroman", "times", "georgia",
+    "garamond", "minion", "palatino", "bookman", "aptosserif",
+    "applemyungjo", "nanummyeongjo", "kopubbatang", "batang",
+)
+_PREF_LATIN_SANS: Tuple[str, ...] = (
+    "helvetica", "arial", "sfpro", "sfns", "univers", "frutiger",
+    "futura", "grotesk", "aptos",
+    "applesdgothicneo", "applegothic", "pretendard",
+    "nanumgothic", "nanumsquare", "malgun", "arialunicode",
+)
+
+
 @dataclass
 class SimpleTextTarget:
     page_index: int
@@ -261,22 +288,25 @@ class TextEditSupport:
         return pieces
 
     def _span_hit_score(self, span: SpanInfo, point: fitz.Point, hit_char_index: int = -1) -> Tuple[float, float, float, float]:
-        rect = fitz.Rect(span.rect)
-        baseline_y = float(span.origin.y)
-        vertical_dist = abs(float(point.y) - baseline_y)
-        center_y = (float(rect.y0) + float(rect.y1)) * 0.5
-        center_x = (float(rect.x0) + float(rect.x1)) * 0.5
-        x_dist = abs(float(point.x) - center_x)
-        area = max(1e-6, float(rect.width * rect.height))
+        # NOTE: span.rect / ch.rect are already fitz.Rect — do not re-wrap.
+        px = float(point.x)
+        py = float(point.y)
+        vertical_dist = abs(py - float(span.origin.y))
 
         if 0 <= hit_char_index < len(span.chars):
-            char_rect = fitz.Rect(span.chars[hit_char_index].rect)
-            center_y = (float(char_rect.y0) + float(char_rect.y1)) * 0.5
-            center_x = (float(char_rect.x0) + float(char_rect.x1)) * 0.5
-            x_dist = abs(float(point.x) - center_x)
-            area = max(1e-6, float(char_rect.width * char_rect.height))
+            cr = span.chars[hit_char_index].rect
+            y0 = float(cr.y0); y1 = float(cr.y1)
+            x0 = float(cr.x0); x1 = float(cr.x1)
+        else:
+            sr = span.rect
+            y0 = float(sr.y0); y1 = float(sr.y1)
+            x0 = float(sr.x0); x1 = float(sr.x1)
 
-        return (vertical_dist, x_dist, area, abs(float(point.y) - center_y))
+        center_y = (y0 + y1) * 0.5
+        center_x = (x0 + x1) * 0.5
+        x_dist = abs(px - center_x)
+        area = max(1e-6, (x1 - x0) * (y1 - y0))
+        return (vertical_dist, x_dist, area, abs(py - center_y))
 
     def _make_span_target(self, span: SpanInfo) -> Optional[SimpleTextTarget]:
         if not span.text:
@@ -796,85 +826,58 @@ class TextEditSupport:
         w._system_font_resources_cache = out
         return out
 
+    def _pick_preferred_table(
+        self,
+        contains_hangul: bool,
+        prefer_serif: bool,
+    ) -> Tuple[str, ...]:
+        if contains_hangul:
+            return _PREF_HANGUL_SERIF if prefer_serif else _PREF_HANGUL_SANS
+        return _PREF_LATIN_SERIF if prefer_serif else _PREF_LATIN_SANS
+
     def _font_priority_score(
         self,
-        font: _SystemFontResource,
+        font: "_SystemFontResource",
         text: str,
         prefer_serif: bool,
         source_font_name: str = "",
         force_italic: bool = False,
         force_bold: bool = False,
-    ) -> Tuple[int, int, int, int, int, int, int, int, int, int, int, str]:
+    ) -> Tuple:
+        """단일 폰트 점수 (외부 호출/테스트용). 정렬 시에는 사용하지 말 것.
+
+        대량 정렬은 `_score_font_resources` 를 써야 preferred 룩업이 한 번만
+        생성되고 `contains_hangul` 도 한 번만 계산된다.
+        """
         contains_hangul = self._contains_hangul(text)
-        lowered = font.display_name.lower()
+        preferred = self._pick_preferred_table(contains_hangul, prefer_serif)
+        return self._score_single(
+            font,
+            contains_hangul=contains_hangul,
+            prefer_serif=prefer_serif,
+            source_font_name=source_font_name,
+            force_italic=force_italic,
+            force_bold=force_bold,
+            preferred=preferred,
+        )
+
+    def _score_single(
+        self,
+        font: "_SystemFontResource",
+        *,
+        contains_hangul: bool,
+        prefer_serif: bool,
+        source_font_name: str,
+        force_italic: bool,
+        force_bold: bool,
+        preferred: Tuple[str, ...],
+    ) -> Tuple:
         source_match = self._font_name_match_score(source_font_name, font)
 
-        if contains_hangul:
-            preferred_serif = [
-                "applemyungjo",
-                "nanummyeongjo",
-                "kopubbatang",
-                "batang",
-                "timesnewroman",
-                "times",
-                "georgia",
-                "baskerville",
-                "aptosserif",
-            ]
-            preferred_sans = [
-                "applesdgothicneo",
-                "applegothic",
-                "pretendard",
-                "nanumgothic",
-                "nanumsquare",
-                "malgun",
-                "arialunicode",
-                "arial",
-                "helvetica",
-                "aptos",
-                "sfpro",
-                "sfns",
-            ]
-        else:
-            preferred_serif = [
-                "newbaskerville",
-                "baskerville",
-                "timesnewroman",
-                "times",
-                "georgia",
-                "garamond",
-                "minion",
-                "palatino",
-                "bookman",
-                "aptosserif",
-                "applemyungjo",
-                "nanummyeongjo",
-                "kopubbatang",
-                "batang",
-            ]
-            preferred_sans = [
-                "helvetica",
-                "arial",
-                "sfpro",
-                "sfns",
-                "univers",
-                "frutiger",
-                "futura",
-                "grotesk",
-                "aptos",
-                "applesdgothicneo",
-                "applegothic",
-                "pretendard",
-                "nanumgothic",
-                "nanumsquare",
-                "malgun",
-                "arialunicode",
-            ]
-        preferred = preferred_serif if prefer_serif else preferred_sans
-
+        normalized_lookup = self._normalize_font_lookup_key(font.display_name.lower())
         preferred_index = len(preferred) + 1
         for idx, token in enumerate(preferred):
-            if token in self._normalize_font_lookup_key(lowered):
+            if token in normalized_lookup:
                 preferred_index = idx
                 break
 
@@ -884,9 +887,7 @@ class TextEditSupport:
         if (not prefer_serif) and font.family_hint == "times":
             family_penalty = 1
 
-        hangul_penalty = 0
-        if contains_hangul and not font.supports_hangul:
-            hangul_penalty = 1
+        hangul_penalty = 1 if (contains_hangul and not font.supports_hangul) else 0
 
         style_penalty = 0
         if force_bold and not font.is_bold:
@@ -926,28 +927,44 @@ class TextEditSupport:
 
         contains_hangul = self._contains_hangul(text)
         needs_math = self._contains_math_unicode(text)
-        out: List[Path] = []
-        resources = sorted(
-            self._system_font_resources(),
-            key=lambda item: self._font_priority_score(
-                item,
-                text,
-                prefer_serif=prefer_serif,
-                source_font_name=source_font_name,
-                force_italic=force_italic,
-                force_bold=force_bold,
-            ),
-        )
+        preferred = self._pick_preferred_table(contains_hangul, prefer_serif)
 
-        for resource in resources:
+        # 1) 빠른 pre-filter: Resource 필드만 보는 체크를 정렬 전에 미리 수행.
+        #    한글 필수인데 지원 안 하면 정렬 자체에 올릴 필요가 없음.
+        candidates: List["_SystemFontResource"] = []
+        for resource in self._system_font_resources():
             if contains_hangul and not resource.supports_hangul:
                 continue
             if needs_math and not resource.supports_math and not resource.supports_hangul:
                 continue
+            candidates.append(resource)
+
+        # 2) 스코어 튜플을 한 번만 계산해서 정렬 key 로 사용 (DSU 패턴).
+        scored: List[Tuple[Tuple, "_SystemFontResource"]] = [
+            (
+                self._score_single(
+                    resource,
+                    contains_hangul=contains_hangul,
+                    prefer_serif=prefer_serif,
+                    source_font_name=source_font_name,
+                    force_italic=force_italic,
+                    force_bold=force_bold,
+                    preferred=preferred,
+                ),
+                resource,
+            )
+            for resource in candidates
+        ]
+        scored.sort(key=lambda item: item[0])
+
+        # 3) 글리프 커버리지는 마지막에만 (캐시되지만 파일 I/O 유발 가능).
+        out: List[Path] = []
+        limit_n = max(1, int(limit))
+        for _, resource in scored:
             if not self._font_supports_text(resource.path, text):
                 continue
             out.append(resource.path)
-            if len(out) >= max(1, int(limit)):
+            if len(out) >= limit_n:
                 break
         return out
 
@@ -1152,69 +1169,124 @@ class TextEditSupport:
         return options
 
     def _locate_hit_span(self, page_idx: int, click_point: fitz.Point) -> Tuple[List[SpanInfo], Optional[SpanInfo], int]:
+        """클릭 지점에 대한 span/char 히트 테스트.
+
+        최적화:
+        - span.rect / ch.rect 는 이미 fitz.Rect 이므로 재래핑/덧셈 금지.
+        - 클릭 y 축으로 각 span 의 y-band 를 raw float 비교로 조기 배제.
+        - char 히트 테스트는 raw float 비교(인라인)로 fitz.Rect 할당 제거.
+
+        세 개의 패스를 하나의 순회로 합쳤다:
+          1) 정확히 span rect 안에 들어오는 경우
+          2) tol=1.6 슬랙이 있는 경우
+          3) tol=4.0 내 최근접 span (point-to-rect 거리)
+        우선순위 1 > 2 > 3 이며, 상위 패스에서 결과가 나오면 하위 패스는 건너뛴다.
+        """
         w = self.window
         spans = w.current_spans_by_page.get(page_idx) or w._get_page_base_spans(page_idx)
         if not spans:
             return [], None, -1
 
+        px = float(click_point.x)
+        py = float(click_point.y)
+
+        SLACK_TOL = 1.6
+        NEAREST_TOL = 4.0
+        NEAREST_LIMIT_SQ = NEAREST_TOL * NEAREST_TOL
+
         best_span = None
         best_score = None
         hit_char_index = -1
 
+        slack_span = None
+        slack_score = None
+        slack_hit_idx = -1
+
+        nearest_span = None
+        nearest_hit_idx = -1
+        nearest_dist = None
+        nearest_score = None
+
         for span in spans:
-            if not fitz.Rect(span.rect).contains(click_point):
+            sr = span.rect
+            sx0 = float(sr.x0); sx1 = float(sr.x1)
+            sy0 = float(sr.y0); sy1 = float(sr.y1)
+
+            # y-band 조기 배제 (NEAREST_TOL 슬랙 기준)
+            if py < sy0 - NEAREST_TOL or py > sy1 + NEAREST_TOL:
                 continue
 
-            local_hit_idx = -1
-            for idx, ch in enumerate(span.chars):
-                if (fitz.Rect(ch.rect) + (-0.3, -0.3, 0.3, 0.3)).contains(click_point):
-                    local_hit_idx = idx
-                    break
+            inside = (sx0 <= px <= sx1) and (sy0 <= py <= sy1)
+            slack_in = (
+                (sx0 - SLACK_TOL) <= px <= (sx1 + SLACK_TOL)
+                and (sy0 - SLACK_TOL) <= py <= (sy1 + SLACK_TOL)
+            )
 
-            score = self._span_hit_score(span, click_point, local_hit_idx)
-            if best_span is None or score < best_score:
-                best_span = span
-                best_score = score
-                hit_char_index = local_hit_idx
-
-        if best_span is None:
-            tol = 1.6
-            for span in spans:
-                if not (fitz.Rect(span.rect) + (-tol, -tol, tol, tol)).contains(click_point):
-                    continue
-
+            if inside:
                 local_hit_idx = -1
                 for idx, ch in enumerate(span.chars):
-                    if (fitz.Rect(ch.rect) + (-tol, -tol, tol, tol)).contains(click_point):
+                    cr = ch.rect
+                    if (float(cr.x0) - 0.3) <= px <= (float(cr.x1) + 0.3) \
+                       and (float(cr.y0) - 0.3) <= py <= (float(cr.y1) + 0.3):
                         local_hit_idx = idx
                         break
-
                 score = self._span_hit_score(span, click_point, local_hit_idx)
                 if best_span is None or score < best_score:
                     best_span = span
                     best_score = score
                     hit_char_index = local_hit_idx
+                # 패스1 히트가 있으면 slack/nearest 계산은 필요 없음
+                continue
 
-        if best_span is None:
-            nearest_span = None
-            nearest_hit_idx = -1
-            nearest_dist = None
-            nearest_score = None
-            tol = 4.0
-            max_dist_sq = tol * tol
+            if best_span is None and slack_in:
+                local_hit_idx = -1
+                for idx, ch in enumerate(span.chars):
+                    cr = ch.rect
+                    if (float(cr.x0) - SLACK_TOL) <= px <= (float(cr.x1) + SLACK_TOL) \
+                       and (float(cr.y0) - SLACK_TOL) <= py <= (float(cr.y1) + SLACK_TOL):
+                        local_hit_idx = idx
+                        break
+                score = self._span_hit_score(span, click_point, local_hit_idx)
+                if slack_span is None or score < slack_score:
+                    slack_span = span
+                    slack_score = score
+                    slack_hit_idx = local_hit_idx
+                continue
 
-            for span in spans:
-                span_rect = fitz.Rect(span.rect)
-                span_dist = self._rect_distance_sq(span_rect, click_point)
-                if span_dist > max_dist_sq:
+            # 패스3: 점-사각형 거리 계산 (NEAREST_TOL 내)
+            if best_span is None and slack_span is None:
+                dx = 0.0
+                dy = 0.0
+                if px < sx0:
+                    dx = sx0 - px
+                elif px > sx1:
+                    dx = px - sx1
+                if py < sy0:
+                    dy = sy0 - py
+                elif py > sy1:
+                    dy = py - sy1
+                span_dist = dx * dx + dy * dy
+                if span_dist > NEAREST_LIMIT_SQ:
                     continue
 
                 local_hit_idx = -1
                 local_dist = span_dist
                 for idx, ch in enumerate(span.chars):
-                    ch_rect = fitz.Rect(ch.rect)
-                    ch_dist = self._rect_distance_sq(ch_rect, click_point)
-                    if ch_dist <= max_dist_sq and (local_hit_idx < 0 or ch_dist < local_dist):
+                    cr = ch.rect
+                    cx0 = float(cr.x0); cx1 = float(cr.x1)
+                    cy0 = float(cr.y0); cy1 = float(cr.y1)
+                    ddx = 0.0
+                    ddy = 0.0
+                    if px < cx0:
+                        ddx = cx0 - px
+                    elif px > cx1:
+                        ddx = px - cx1
+                    if py < cy0:
+                        ddy = cy0 - py
+                    elif py > cy1:
+                        ddy = py - cy1
+                    ch_dist = ddx * ddx + ddy * ddy
+                    if ch_dist <= NEAREST_LIMIT_SQ and (local_hit_idx < 0 or ch_dist < local_dist):
                         local_hit_idx = idx
                         local_dist = ch_dist
 
@@ -1229,7 +1301,11 @@ class TextEditSupport:
                     nearest_dist = local_dist
                     nearest_score = score
 
-            if nearest_span is not None:
+        if best_span is None:
+            if slack_span is not None:
+                best_span = slack_span
+                hit_char_index = slack_hit_idx
+            elif nearest_span is not None:
                 best_span = nearest_span
                 hit_char_index = nearest_hit_idx
 
@@ -2709,17 +2785,26 @@ class TextEditSupport:
         prefs = self._font_preferences()
         pdf_key = self._current_pdf_key()
         recent_paths = prefs.get_recent() if prefs is not None else []
+        pinned_path = prefs.get_pinned() if prefs is not None else None
 
-        # 이 PDF에서 같은 원본 폰트 이름에 대해 사용자가 이전에 고른 폰트가 있으면
-        # 다이얼로그 초기 선택값으로 사용
+        # 우선순위: (이 PDF, 이 원본 폰트) 별칭 > 전역 고정 폰트 > 자동
         alias_path: Optional[str] = None
         if prefs is not None and target.font_name:
             alias_path = prefs.get_alias(pdf_key, target.font_name)
 
         font_options = self.font_dialog_options(target, recent_paths=recent_paths)
-        # 별칭이 가리키는 폰트가 현재 시스템에 없으면 무시
         available_keys = {key for key, _ in font_options}
-        initial_choice = alias_path if (alias_path and alias_path in available_keys) else None
+
+        # 시스템에 존재하지 않는 경로는 초기 선택에서 배제
+        alias_valid = bool(alias_path) and alias_path in available_keys
+        pin_valid = bool(pinned_path) and pinned_path in available_keys
+
+        if alias_valid:
+            initial_choice = alias_path
+        elif pin_valid:
+            initial_choice = pinned_path
+        else:
+            initial_choice = None
 
         action = run_text_edit_dialog(
             w,
@@ -2727,6 +2812,8 @@ class TextEditSupport:
             select_line,
             font_options,
             initial_font_choice=initial_choice,
+            pinned_font_choice=pinned_path if pin_valid else None,
+            alias_applied=alias_valid,
         )
         if action is None:
             return True
@@ -2734,11 +2821,27 @@ class TextEditSupport:
         font_key = str(action.get("font_choice", "__auto__") or "__auto__")
         preferred_font_path = None if font_key == "__auto__" else Path(font_key)
 
-        # 사용자가 수동으로 폰트를 골랐다면 최근 목록과 PDF별 별칭에 기록
-        if prefs is not None and font_key != "__auto__":
+        if prefs is not None:
             try:
-                prefs.add_recent(font_key)
-                if target.font_name:
+                if font_key != "__auto__":
+                    prefs.add_recent(font_key)
+
+                # ----- pin 관리 --------------------------------------------
+                pin_requested = bool(action.get("pin_requested", False))
+                if pin_requested and font_key != "__auto__":
+                    # 체크됨 → 현재 폰트를 전역 고정. 이미 같으면 set_pinned 가 no-op.
+                    prefs.set_pinned(font_key)
+                elif (not pin_requested) and pinned_path and font_key == pinned_path:
+                    # 체크 해제 + 현재 폰트 == 기존 고정 폰트 → 사용자가 의도적으로 해제
+                    prefs.clear_pinned()
+
+                # ----- 별칭 저장 규칙 --------------------------------------
+                # 사용자가 다이얼로그 초기값 그대로 Apply 한 경우에는 중복 저장 생략.
+                # 예: 고정 폰트가 자동 선택된 상태에서 그대로 Apply → 별칭 만들지 않음.
+                # 단, 별칭은 여전히 "PDF별 보정"의 목적이 있으므로 명시적으로 바꾼 경우에만 저장.
+                initial_shown = str(action.get("initial_font_choice", "__auto__") or "__auto__")
+                changed_from_initial = font_key != initial_shown
+                if target.font_name and font_key != "__auto__" and changed_from_initial:
                     prefs.set_alias(pdf_key, target.font_name, font_key)
             except Exception:
                 pass

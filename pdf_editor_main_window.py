@@ -1,6 +1,7 @@
 import re
 import sys
 import tempfile
+from collections import deque
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -232,9 +233,9 @@ class MainWindow(QMainWindow):
         self.link_deletes: List[LinkDeleteEntry] = []
         self.page_clipboard: Optional[PageClipboard] = None
 
-        self.undo_stack = []
-        self.redo_stack = []
         self.max_undo_steps = 120
+        self.undo_stack: deque = deque(maxlen=self.max_undo_steps)
+        self.redo_stack: deque = deque()
 
         self.modified = False
         self.save_path: Optional[Path] = None
@@ -243,6 +244,9 @@ class MainWindow(QMainWindow):
 
         self.search_query = ""
         self.search_results: List[Tuple[int, fitz.Rect]] = []
+        # 페이지별 검색 결과 인덱스: page_idx -> List[(global_idx, rect)]
+        # render_page 에서 전체 결과를 순회하지 않고 현재 보이는 페이지만 참조.
+        self.search_results_by_page: Dict[int, List[Tuple[int, fitz.Rect]]] = {}
         self.search_index = -1
         self.last_auto_link_term = ""
 
@@ -907,9 +911,17 @@ class MainWindow(QMainWindow):
     def _mark_modified(self):
         self.modified = True
 
+    def _rebuild_search_results_index(self):
+        """search_results 로부터 페이지별 버킷을 재구성."""
+        bucket: Dict[int, List[Tuple[int, fitz.Rect]]] = {}
+        for idx, (p_idx, rect) in enumerate(self.search_results):
+            bucket.setdefault(p_idx, []).append((idx, rect))
+        self.search_results_by_page = bucket
+
     def _clear_search_state(self):
         self.search_query = ""
         self.search_results.clear()
+        self.search_results_by_page.clear()
         self.search_index = -1
         self.search_input.clear()
         self.search_label.setText("")
@@ -920,6 +932,7 @@ class MainWindow(QMainWindow):
 
     def _clear_search_matches(self, rerender: bool = False):
         self.search_results.clear()
+        self.search_results_by_page.clear()
         self.search_index = -1
         self.search_label.setText("")
         self._update_search_action_ui()
@@ -939,6 +952,7 @@ class MainWindow(QMainWindow):
         if query != self.search_query:
             had_visible_matches = bool(self.search_results)
             self.search_results.clear()
+            self.search_results_by_page.clear()
             self.search_index = -1
             self.search_label.setText("")
             self._update_search_action_ui()
@@ -966,10 +980,8 @@ class MainWindow(QMainWindow):
             self.current_page_index,
             [AnnotationEntry(a.page_index, fitz.Rect(a.rect), a.annot_type, a.color) for a in self.annotations],
         )
-        self.undo_stack.append(snapshot)
+        self.undo_stack.append(snapshot)  # deque(maxlen=...) 가 오래된 항목을 자동 축출
         self.redo_stack.clear()
-        if len(self.undo_stack) > self.max_undo_steps:
-            self.undo_stack.pop(0)
 
     def _restore_snapshot(self, snapshot):
         if len(snapshot) >= 7:
@@ -1823,6 +1835,8 @@ class MainWindow(QMainWindow):
                     span_size = float(span.get("size", 11.0) or 11.0)
                     span_font_name = span.get("font", "Helvetica")
                     space_trigger, approx_space = self._span_space_metrics(raw_chars, span_size)
+                    # compact_vertical_bounds 는 span 내에서 상수 → 루프 밖으로 hoist
+                    top, bottom = compact_vertical_bounds(span_origin.y, span_size, span_asc, span_desc)
                     prev_right = None
                     prev_origin_y = None
                     for ch in raw_chars:
@@ -1832,7 +1846,6 @@ class MainWindow(QMainWindow):
                             continue
                         ch_origin_raw = ch.get("origin", (cb[0], span_origin.y))
                         ch_origin = fitz.Point(float(ch_origin_raw[0]), float(ch_origin_raw[1]))
-                        top, bottom = compact_vertical_bounds(span_origin.y, span_size, span_asc, span_desc)
                         if prev_right is not None:
                             gap = float(cb[0]) - float(prev_right)
                             baseline_delta = abs(float(ch_origin.y) - float(prev_origin_y or ch_origin.y))
@@ -1869,10 +1882,12 @@ class MainWindow(QMainWindow):
                     if not text.strip():
                         continue
 
-                    char_rects = [c.rect for c in chars]
-                    tight_rect = fitz.Rect(char_rects[0])
-                    for r in char_rects[1:]:
-                        tight_rect |= r
+                    # 리스트 생성 없이 char rect 들을 바로 union.
+                    char_iter = iter(chars)
+                    first_char = next(char_iter)
+                    tight_rect = fitz.Rect(first_char.rect)
+                    for c in char_iter:
+                        tight_rect |= c.rect
 
                     spans.append(
                         SpanInfo(
@@ -1968,10 +1983,17 @@ class MainWindow(QMainWindow):
 
         no_pen = QPen(Qt.NoPen)
 
+        # 링크 삭제 예정 목록을 페이지별로 1회 인덱싱 (O(deletes))
+        # 이후 링크 오버레이 그릴 때 O(visible_links × deletes_on_that_page) 로 축소.
+        link_deletes_by_page: Dict[int, List[fitz.Rect]] = {}
+        for d in self.link_deletes:
+            link_deletes_by_page.setdefault(d.page_index, []).append(d.link_rect)
+
         if self.show_links_btn.isChecked():
             try:
                 for page_idx in page_indices:
                     page = self.doc[page_idx]
+                    page_deletes = link_deletes_by_page.get(page_idx)
                     for lnk in page.get_links():
                         kind = lnk.get("kind")
                         if kind == fitz.LINK_GOTO:
@@ -1983,22 +2005,31 @@ class MainWindow(QMainWindow):
                         else:
                             continue
                         r = fitz.Rect(lnk["from"])
-                        if any(d.page_index == page_idx and fitz.Rect(d.link_rect).intersects(r) for d in self.link_deletes):
-                            continue
+                        if page_deletes:
+                            skipped = False
+                            for dr in page_deletes:
+                                if dr.intersects(r):
+                                    skipped = True
+                                    break
+                            if skipped:
+                                continue
                         pen.setWidth(1)
                         self._add_overlay_rect(page_idx, r, pen, brush)
             except Exception:
                 pass
 
-        if self.search_results:
-            for idx2, (p_idx, rect) in enumerate(self.search_results):
-                if p_idx not in self._page_scene_layouts:
+        # 검색 결과: 보이는 페이지만 순회 (페이지별 버킷 사용)
+        if self.search_results_by_page:
+            current_idx = self.search_index
+            hit_brush = QBrush(QColor(0, 204, 204, 120))
+            other_brush = QBrush(QColor(0, 204, 204, 60))
+            for p_idx in page_indices:
+                bucket = self.search_results_by_page.get(p_idx)
+                if not bucket:
                     continue
-                if idx2 == self.search_index:
-                    brush = QBrush(QColor(0, 204, 204, 120))
-                else:
-                    brush = QBrush(QColor(0, 204, 204, 60))
-                self._add_overlay_rect(p_idx, rect, no_pen, brush)
+                for idx2, rect in bucket:
+                    brush = hit_brush if idx2 == current_idx else other_brush
+                    self._add_overlay_rect(p_idx, rect, no_pen, brush)
 
         for nl in self.new_links:
             if nl.page_index not in self._page_scene_layouts:
@@ -2201,6 +2232,8 @@ class MainWindow(QMainWindow):
                     rects = self.doc[i].search_for(query)
                     for r in rects:
                         self.search_results.append((i, r))
+
+            self._rebuild_search_results_index()
 
             self.search_index = -1
             for i, (p_idx, _) in enumerate(self.search_results):

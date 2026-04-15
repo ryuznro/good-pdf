@@ -8,6 +8,7 @@
 스키마:
 {
     "recent_fonts": ["/path/to/font1.ttf", ...],   # 최대 MAX_RECENT 개
+    "pinned_font":  "/path/to/font.ttf" | null,     # 전역 기본 폰트
     "document_aliases": {
         "<pdf_path>": {
             "<original_font_name>": "/path/to/chosen_font.ttf"
@@ -15,8 +16,12 @@
     }
 }
 
-PDF가 잘못된 폰트 이름을 알려주는 경우, 사용자가 한 번 수동으로 폰트를 선택하면
-그 매핑을 기억해서 같은 PDF의 같은 원본 폰트 이름이 다시 나올 때 자동 적용합니다.
+우선순위: document_aliases > pinned_font > 자동 감지.
+
+- pinned_font: 사용자가 "앞으로 이 폰트를 기본값으로" 체크한 폰트. 새 PDF나
+  별칭이 없는 span 에서 자동 감지 대신 이 폰트가 미리 선택됨.
+- document_aliases: 특정 PDF 에서 특정 원본 폰트 이름이 잘못 감지될 때 보정한
+  매핑. pinned_font 보다 우선함.
 """
 
 from __future__ import annotations
@@ -37,7 +42,11 @@ class FontPreferences:
             base = str(Path.home() / ".config")
         self._dir = Path(base) / "good-pdf"
         self._path = self._dir / "font_preferences.json"
-        self._data: Dict = {"recent_fonts": [], "document_aliases": {}}
+        self._data: Dict = {
+            "recent_fonts": [],
+            "pinned_font": None,
+            "document_aliases": {},
+        }
         self._load()
 
     # ---- persistence -----------------------------------------------------
@@ -52,6 +61,9 @@ class FontPreferences:
             recent = loaded.get("recent_fonts")
             if isinstance(recent, list):
                 self._data["recent_fonts"] = [str(x) for x in recent if isinstance(x, str)]
+            pinned = loaded.get("pinned_font")
+            if isinstance(pinned, str) and pinned:
+                self._data["pinned_font"] = pinned
             aliases = loaded.get("document_aliases")
             if isinstance(aliases, dict):
                 cleaned: Dict[str, Dict[str, str]] = {}
@@ -66,7 +78,11 @@ class FontPreferences:
                 self._data["document_aliases"] = cleaned
         except Exception:
             # 손상된 파일 등은 조용히 초기화
-            self._data = {"recent_fonts": [], "document_aliases": {}}
+            self._data = {
+                "recent_fonts": [],
+                "pinned_font": None,
+                "document_aliases": {},
+            }
 
     def _save(self) -> None:
         try:
@@ -77,6 +93,26 @@ class FontPreferences:
             tmp.replace(self._path)
         except Exception:
             pass
+
+    # ---- pinned font (global default) ------------------------------------
+    def get_pinned(self) -> Optional[str]:
+        value = self._data.get("pinned_font")
+        return value if isinstance(value, str) and value else None
+
+    def set_pinned(self, font_path: Optional[str]) -> None:
+        if not font_path or font_path == "__auto__":
+            self.clear_pinned()
+            return
+        if self._data.get("pinned_font") == font_path:
+            return
+        self._data["pinned_font"] = font_path
+        self._save()
+
+    def clear_pinned(self) -> None:
+        if self._data.get("pinned_font") is None:
+            return
+        self._data["pinned_font"] = None
+        self._save()
 
     # ---- recent fonts ----------------------------------------------------
     def get_recent(self) -> List[str]:
