@@ -865,6 +865,37 @@ class MainWindow(QMainWindow):
                 background: #1f2229;
                 width: 1px;
             }
+            QTabWidget::pane {
+                border: 1px solid #2a2f39;
+                border-radius: 10px;
+                background: #111318;
+                top: -1px;
+            }
+            QTabBar {
+                qproperty-drawBase: 0;
+                background: transparent;
+            }
+            QTabBar::tab {
+                background: #23262d;
+                color: #d5dde8;
+                border: 1px solid #323743;
+                padding: 6px 18px;
+                margin: 2px 3px;
+                border-radius: 8px;
+                font-size: 12px;
+                font-weight: 600;
+                min-width: 60px;
+            }
+            QTabBar::tab:selected {
+                background: #30466b;
+                color: #ffffff;
+                border-color: #476aa3;
+            }
+            QTabBar::tab:hover:!selected {
+                background: #2d323c;
+                color: #f2f3f5;
+                border-color: #3f4654;
+            }
             """
         )
 

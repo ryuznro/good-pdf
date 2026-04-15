@@ -25,6 +25,7 @@ def run_text_edit_dialog(
     target: "SimpleTextTarget",
     select_line: bool,
     font_options: Optional[List[Tuple[str, str]]] = None,
+    initial_font_choice: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     dialog = QDialog(parent)
     dialog.setWindowTitle("텍스트 수정 - 좌클릭 또는 Shift+좌클릭")
@@ -37,7 +38,10 @@ def run_text_edit_dialog(
 
     preview = target.text.replace("\n", " ")
     layout.addWidget(QLabel(f"선택된 텍스트: {preview}"))
-    layout.addWidget(QLabel(f"원본 폰트: {target.font_name or '알 수 없음'}"))
+    origin_label_text = f"원본 폰트: {target.font_name or '알 수 없음'}"
+    if initial_font_choice and initial_font_choice != "__auto__":
+        origin_label_text += "  (이 PDF에서 기억된 폰트 적용됨)"
+    layout.addWidget(QLabel(origin_label_text))
 
     text_edit = QTextEdit()
     text_edit.setAcceptRichText(False)
@@ -51,6 +55,13 @@ def run_text_edit_dialog(
     font_grid.setVerticalSpacing(8)
 
     all_font_options = list(font_options or [("__auto__", "자동 (원본 스타일 + 문자셋 기준)")])
+    available_keys = {key for key, _ in all_font_options}
+    desired_initial_key = (
+        initial_font_choice
+        if initial_font_choice and initial_font_choice in available_keys
+        else "__auto__"
+    )
+
     font_filter = QLineEdit()
     font_filter.setPlaceholderText("폰트 필터...")
     font_filter.setClearButtonEnabled(True)
@@ -59,10 +70,13 @@ def run_text_edit_dialog(
     font_combo.setMaxVisibleItems(24)
     font_combo.setMinimumContentsLength(30)
     font_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-    font_combo.setToolTip("자동 또는 설치된 한글/영문 시스템 폰트를 선택합니다.")
+    font_combo.setToolTip(
+        "자동 또는 설치된 한글/영문 시스템 폰트를 선택합니다.\n"
+        "★ 표시는 최근 사용한 폰트입니다."
+    )
 
     def refresh_font_combo(query: str = ""):
-        current_key = str(font_combo.currentData() or "__auto__")
+        current_key = str(font_combo.currentData() or desired_initial_key)
         needle = (query or "").strip().lower()
         font_combo.blockSignals(True)
         font_combo.clear()

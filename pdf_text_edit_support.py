@@ -1099,10 +1099,41 @@ class TextEditSupport:
             return plans[0]
         return None
 
-    def font_dialog_options(self, target: SimpleTextTarget) -> List[Tuple[str, str]]:
+    def font_dialog_options(
+        self,
+        target: SimpleTextTarget,
+        recent_paths: Optional[List[str]] = None,
+    ) -> List[Tuple[str, str]]:
+        def _label_for(resource) -> str:
+            suffix = []
+            if resource.supports_hangul:
+                suffix.append("한글")
+            suffix.append("serif" if resource.family_hint == "times" else "sans")
+            if resource.is_bold:
+                suffix.append("bold")
+            if resource.is_italic:
+                suffix.append("italic")
+            return f"{resource.display_name} [{', '.join(suffix)}]"
+
+        all_resources = list(self._system_font_resources())
+        by_path = {str(r.path): r for r in all_resources}
+
         options: List[Tuple[str, str]] = [("__auto__", "자동 (원본 스타일 + 문자셋 기준)")]
+
+        # 최근 사용 폰트 (★ 표시, 콤보박스 상단 노출)
+        recent_added: List[str] = []
+        for rp in recent_paths or []:
+            if rp in by_path and rp not in recent_added:
+                resource = by_path[rp]
+                if not resource.supports_ascii:
+                    continue
+                options.append((rp, f"★ {_label_for(resource)}"))
+                recent_added.append(rp)
+
+        # 전체 시스템 폰트 (최근 사용 항목 제외)
+        recent_set = set(recent_added)
         for resource in sorted(
-            self._system_font_resources(),
+            all_resources,
             key=lambda item: self._font_priority_score(
                 item,
                 target.text,
@@ -1114,16 +1145,10 @@ class TextEditSupport:
         ):
             if not resource.supports_ascii:
                 continue
-            suffix = []
-            if resource.supports_hangul:
-                suffix.append("한글")
-            suffix.append("serif" if resource.family_hint == "times" else "sans")
-            if resource.is_bold:
-                suffix.append("bold")
-            if resource.is_italic:
-                suffix.append("italic")
-            label = f"{resource.display_name} [{', '.join(suffix)}]"
-            options.append((str(resource.path), label))
+            path_key = str(resource.path)
+            if path_key in recent_set:
+                continue
+            options.append((path_key, _label_for(resource)))
         return options
 
     def _locate_hit_span(self, page_idx: int, click_point: fitz.Point) -> Tuple[List[SpanInfo], Optional[SpanInfo], int]:
@@ -2649,6 +2674,28 @@ class TextEditSupport:
             QMessageBox.critical(w, "텍스트 수정 실패", f"오류:\n{e}")
             return False
 
+    def _font_preferences(self):
+        w = self.window
+        prefs = getattr(w, "_font_preferences_instance", None)
+        if prefs is None:
+            try:
+                from pdf_font_preferences import FontPreferences
+                prefs = FontPreferences()
+            except Exception:
+                prefs = None
+            w._font_preferences_instance = prefs
+        return prefs
+
+    def _current_pdf_key(self) -> Optional[str]:
+        w = self.window
+        base = getattr(w, "base_path", None)
+        if base is None:
+            return None
+        try:
+            return str(base)
+        except Exception:
+            return None
+
     def edit_text_at_point(self, click_point: fitz.Point, page_index: Optional[int] = None, select_line: bool = False) -> bool:
         w = self.window
         if not w.doc:
@@ -2659,12 +2706,42 @@ class TextEditSupport:
         if target is None:
             return False
 
-        action = run_text_edit_dialog(w, target, select_line, self.font_dialog_options(target))
+        prefs = self._font_preferences()
+        pdf_key = self._current_pdf_key()
+        recent_paths = prefs.get_recent() if prefs is not None else []
+
+        # 이 PDF에서 같은 원본 폰트 이름에 대해 사용자가 이전에 고른 폰트가 있으면
+        # 다이얼로그 초기 선택값으로 사용
+        alias_path: Optional[str] = None
+        if prefs is not None and target.font_name:
+            alias_path = prefs.get_alias(pdf_key, target.font_name)
+
+        font_options = self.font_dialog_options(target, recent_paths=recent_paths)
+        # 별칭이 가리키는 폰트가 현재 시스템에 없으면 무시
+        available_keys = {key for key, _ in font_options}
+        initial_choice = alias_path if (alias_path and alias_path in available_keys) else None
+
+        action = run_text_edit_dialog(
+            w,
+            target,
+            select_line,
+            font_options,
+            initial_font_choice=initial_choice,
+        )
         if action is None:
             return True
 
         font_key = str(action.get("font_choice", "__auto__") or "__auto__")
         preferred_font_path = None if font_key == "__auto__" else Path(font_key)
+
+        # 사용자가 수동으로 폰트를 골랐다면 최근 목록과 PDF별 별칭에 기록
+        if prefs is not None and font_key != "__auto__":
+            try:
+                prefs.add_recent(font_key)
+                if target.font_name:
+                    prefs.set_alias(pdf_key, target.font_name, font_key)
+            except Exception:
+                pass
 
         self._apply_simple_text_replace(
             target,

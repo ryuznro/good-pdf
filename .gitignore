@@ -20,3 +20,9 @@ dist/
 
 # Test files
 test.pdf
+
+# Local macOS release artifact
+Good PDF.app/
+
+# Claude Code workspace
+.claude/
