@@ -216,7 +216,13 @@ class MainWindow(QMainWindow):
         self.current_page_index = 0
         self.continuous_view = False
 
-        self.zoom_levels = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0, 3.5, 4.0, 5.0]
+        # 25% ~ 800%. 낮은/중간 구간은 촘촘하게, 높은 구간은 대략적으로.
+        self.zoom_levels = [
+            0.25, 0.33, 0.50, 0.67, 0.80,
+            1.00, 1.15, 1.25, 1.50, 1.75,
+            2.00, 2.25, 2.50, 3.00, 3.50,
+            4.00, 5.00, 6.00, 8.00,
+        ]
         self.zoom_index = self.zoom_levels.index(3.0)
         self.zoom = self.zoom_levels[self.zoom_index]
 
@@ -286,8 +292,12 @@ class MainWindow(QMainWindow):
         self._scene_padding_x = 18.0
         self._scene_padding_y = 12.0
         self._scene_page_gap = 18.0
-        self._page_render_oversample = 1.35
-        self._thumbnail_render_oversample = 1.45
+        # Retina 디스플레이(DPR 2.0)에서 픽셀 퍼펙트 렌더가 되도록 2.0 으로 설정.
+        # 이전 값 1.35 는 DPR 2.0 에서 Qt 가 업스케일하며 약간 흐릿해졌음.
+        # 메모리 부담: 기존 대비 (2.0/1.35)^2 ≈ 2.2배이지만 페이지 캐시 크기는
+        # 수십 MB 수준이라 허용 범위.
+        self._page_render_oversample = 2.0
+        self._thumbnail_render_oversample = 2.0
         self._pending_thumbnail_focus: Optional[Tuple[int, float, float]] = None
         self._pending_viewport_anchor: Optional[Tuple[int, float, float, float, float]] = None
         self._registration_mark_pick_mode = False
@@ -362,9 +372,10 @@ class MainWindow(QMainWindow):
         self.margin_btn.setToolTip("여백 / 크기 조정")
 
         self.zoom_label = QLabel("300%")
-        self.zoom_label.setFixedWidth(50)
+        # 25% ~ 800% 모두 담기 위해 60px 로 확장 (이전 50px 는 4자리 수에서 잘림).
+        self.zoom_label.setFixedWidth(60)
         self.zoom_label.setAlignment(Qt.AlignCenter)
-        self.zoom_label.setStyleSheet("color: #666666; font-size: 11px;")
+        self.zoom_label.setStyleSheet("color: #888888; font-size: 11px;")
 
         self.highlight_btn = QPushButton("형광펜")
         self.highlight_btn.setCheckable(True)
@@ -2170,7 +2181,8 @@ class MainWindow(QMainWindow):
         if not self._has_open_doc():
             return
         old_zoom = float(self.zoom)
-        clamped_zoom = max(0.45, min(5.5, float(new_zoom)))
+        # zoom_levels 가 0.25 ~ 8.0 이므로 약간의 여유를 둬서 0.20 ~ 9.0 허용.
+        clamped_zoom = max(0.20, min(9.0, float(new_zoom)))
         if abs(clamped_zoom - old_zoom) < 0.01:
             return
         self._pending_viewport_anchor = self._capture_viewport_anchor(anchor_viewport_pos)
